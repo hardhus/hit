@@ -32,8 +32,12 @@ fn main() -> Result<ExitCode> {
 
     match &cli.command {
         None => {
-            let level = cli.log_level.map(Into::into);
-            commands::tui::run(&paths, &config_file, level)?;
+            let options = commands::tui::Options {
+                config_file: &config_file,
+                log_level: cli.log_level.map(Into::into),
+                demo: cli.demo,
+            };
+            commands::tui::run(&paths, &options)?;
             Ok(ExitCode::SUCCESS)
         }
         Some(Command::Config { command }) => commands::config::run(command, &config_file),

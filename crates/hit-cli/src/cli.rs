@@ -20,6 +20,7 @@ Run `hit` with no arguments to open the TUI.";
 const AFTER_HELP: &str = "\
 Examples:
   hit                       open the TUI
+  hit --demo                try hit with sample data, no account needed
   hit paths                 show config, data, state, cache and log directories
   hit config init           write a commented default config.toml
   hit config check          validate config.toml and list warnings
@@ -28,6 +29,7 @@ Examples:
 Environment:
   HIT_LOG                   log filter (e.g. debug, hit_tui=trace)
   HIT_CONFIG                config file to use instead of the default
+  HIT_DEMO                  same as --demo
   HIT_CONFIG_DIR, HIT_DATA_DIR, HIT_STATE_DIR, HIT_CACHE_DIR
                             override individual directories";
 
@@ -48,6 +50,11 @@ pub struct Cli {
     /// Log level for this run (overrides the config; HIT_LOG overrides both).
     #[arg(long, global = true, value_name = "LEVEL")]
     pub log_level: Option<LevelArg>,
+
+    /// Explore hit with realistic sample data; no account needed and nothing
+    /// you do leaves your machine.
+    #[arg(long, env = "HIT_DEMO")]
+    pub demo: bool,
 
     #[command(subcommand)]
     pub command: Option<Command>,

@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use hit_config::Config;
+use hit_core::Forges;
 use ratatui::{Frame, widgets::Block};
 use tokio::{sync::mpsc, time::MissedTickBehavior};
 
@@ -13,8 +14,8 @@ use crate::{
 };
 
 /// Runs the TUI until the user quits or a shutdown signal arrives.
-pub async fn run(config: &Config, warnings: Vec<String>) -> Result<(), TuiError> {
-    let mut app = App::new(config);
+pub async fn run(config: &Config, warnings: Vec<String>, forges: Forges) -> Result<(), TuiError> {
+    let mut app = App::new(config, forges);
     app.push(Box::new(Welcome::new(warnings)));
     app.run().await
 }
@@ -29,13 +30,13 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(config: &Config) -> Self {
+    pub fn new(config: &Config, forges: Forges) -> Self {
         let (tx, actions) = mpsc::unbounded_channel();
         let theme = Theme::from_config(&config.ui);
         let fps = f64::from(config.ui.max_fps.max(1));
         Self {
             views: Vec::new(),
-            ctx: Ctx::new(theme, config.ui.animations, tx),
+            ctx: Ctx::new(theme, config.ui.animations, forges, tx),
             actions,
             frame_interval: Duration::from_secs_f64(1.0 / fps),
             dirty: true,
@@ -43,7 +44,10 @@ impl App {
         }
     }
 
-    pub fn push(&mut self, view: Box<dyn View>) {
+    /// Pushes a view and mounts it. Must be called inside the tokio runtime,
+    /// as views may start background fetches when mounted.
+    pub fn push(&mut self, mut view: Box<dyn View>) {
+        view.mount(&self.ctx);
         self.views.push(view);
         self.dirty = true;
     }
@@ -145,7 +149,7 @@ impl App {
                     self.quit = true;
                 }
             }
-            Action::Redraw => {}
+            Action::Redraw | Action::Data(_) => {}
         }
         if let Some(view) = self.views.last_mut()
             && let Some(next) = view.update(&action, &self.ctx)

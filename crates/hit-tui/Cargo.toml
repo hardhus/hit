@@ -12,6 +12,7 @@ authors.workspace = true
 crossterm.workspace = true
 futures.workspace = true
 hit-config.workspace = true
+hit-core.workspace = true
 ratatui.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
@@ -20,3 +21,7 @@ tracing.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+hit-forge-mock.workspace = true
+tokio = { workspace = true, features = ["rt", "macros", "test-util"] }
