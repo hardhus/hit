@@ -12,8 +12,41 @@ pub struct Config {
     pub ui: UiConfig,
     pub log: LogConfig,
     pub auth: AuthConfig,
+    pub focus: FocusConfig,
     /// Per-host settings, keyed by host name (e.g. `ghe.example.com`).
     pub hosts: BTreeMap<String, HostConfig>,
+}
+
+/// What appears in Action Required.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FocusConfig {
+    /// Pull requests waiting for your review (directly or via a team).
+    pub review_requests: bool,
+    /// Your pull requests with requested changes, failing checks, or ready to merge.
+    pub my_pull_requests: bool,
+    /// Open issues and pull requests that mention you.
+    pub mentions: bool,
+    /// Only mentions from the last this many days.
+    pub mention_days: u32,
+    /// Open issues and pull requests assigned to you.
+    pub assigned: bool,
+}
+
+impl FocusConfig {
+    pub const MENTION_DAYS_RANGE: (u32, u32) = (1, 365);
+}
+
+impl Default for FocusConfig {
+    fn default() -> Self {
+        Self {
+            review_requests: true,
+            my_pull_requests: true,
+            mentions: true,
+            mention_days: 14,
+            assigned: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

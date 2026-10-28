@@ -13,7 +13,7 @@ use std::{
 use serde::de::DeserializeOwned;
 use toml::{Table, Value};
 
-use crate::model::{Config, LogConfig, UiConfig};
+use crate::model::{Config, FocusConfig, LogConfig, UiConfig};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -167,6 +167,7 @@ pub(crate) fn parse(text: &str) -> (Config, Vec<ConfigWarning>) {
         ui: section(&mut root, "ui", &mut warnings),
         log: section(&mut root, "log", &mut warnings),
         auth: section(&mut root, "auth", &mut warnings),
+        focus: section(&mut root, "focus", &mut warnings),
         hosts: section(&mut root, "hosts", &mut warnings),
     };
 
@@ -249,6 +250,16 @@ fn validate(config: &mut Config, warnings: &mut Vec<ConfigWarning>) {
         hi,
         "log",
         "retention_days",
+        warnings,
+    );
+
+    let (lo, hi) = FocusConfig::MENTION_DAYS_RANGE;
+    clamp(
+        &mut config.focus.mention_days,
+        lo,
+        hi,
+        "focus",
+        "mention_days",
         warnings,
     );
 

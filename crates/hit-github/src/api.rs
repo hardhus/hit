@@ -9,12 +9,71 @@ use reqwest::{
     Client, Method, Response, StatusCode,
     header::{self, HeaderMap, HeaderValue},
 };
+use serde::{Deserialize, de::DeserializeOwned};
 use url::Url;
 
 use crate::GithubHost;
 
 const API_VERSION: &str = "2022-11-28";
 const MAX_MESSAGE: usize = 300;
+const JSON: &str = "application/vnd.github+json";
+
+#[derive(Deserialize)]
+struct GraphqlReply<T> {
+    data: Option<T>,
+    errors: Option<Vec<GraphqlError>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphqlError {
+    message: String,
+    #[serde(rename = "type")]
+    kind: Option<String>,
+}
+
+impl GraphqlError {
+    fn into_forge_error(self) -> ForgeError {
+        let message: String = self.message.chars().take(MAX_MESSAGE).collect();
+        match self.kind.as_deref() {
+            Some("NOT_FOUND") => ForgeError::NotFound,
+            Some("FORBIDDEN") => ForgeError::Forbidden {
+                message,
+                hint: None,
+            },
+            Some("INSUFFICIENT_SCOPES") => ForgeError::Forbidden {
+                message,
+                hint: Some(AccessHint::TokenScope {
+                    needed: "see the error message".to_owned(),
+                }),
+            },
+            Some("RATE_LIMITED") => ForgeError::RateLimited { reset_at: None },
+            _ => ForgeError::InvalidResponse(format!("graphql: {message}")),
+        }
+    }
+}
+
+async fn decode<T: DeserializeOwned>(response: Response, what: &str) -> Result<T, ForgeError> {
+    response
+        .json()
+        .await
+        .map_err(|e| ForgeError::InvalidResponse(format!("{what}: {}", e.without_url())))
+}
+
+/// The `page` of the `rel="next"` link in a `Link` header.
+pub(crate) fn next_page(headers: &HeaderMap) -> Option<u32> {
+    let link = headers.get(header::LINK)?.to_str().ok()?;
+    link.split(',').find_map(|part| {
+        let (target, params) = part.split_once(';')?;
+        if !params.contains("rel=\"next\"") {
+            return None;
+        }
+        let target = target.trim().trim_start_matches('<').trim_end_matches('>');
+        let url = Url::parse(target).ok()?;
+        url.query_pairs()
+            .find(|(k, _)| k == "page")
+            .and_then(|(_, v)| v.parse().ok())
+    })
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ApiOptions {
@@ -63,20 +122,112 @@ impl Api {
         self.send(Method::GET, path, Op::Read).await
     }
 
+    /// `GET` and decode JSON.
+    pub async fn get_json<T: DeserializeOwned>(&self, path: &str) -> Result<T, ForgeError> {
+        decode(self.get(path).await?, path).await
+    }
+
     /// Sends a request to `path`, relative to the REST base.
     pub async fn send(&self, method: Method, path: &str, op: Op) -> Result<Response, ForgeError> {
         guard(&method, op, self.options)?;
         let url = self.url(path)?;
+        self.execute(method, url, JSON, None).await
+    }
+
+    /// Like [`Self::send`] with a JSON body.
+    pub async fn send_json(
+        &self,
+        method: Method,
+        path: &str,
+        op: Op,
+        body: &serde_json::Value,
+    ) -> Result<Response, ForgeError> {
+        guard(&method, op, self.options)?;
+        let url = self.url(path)?;
+        self.execute(method, url, JSON, Some(body)).await
+    }
+
+    /// `GET` with a custom media type (e.g. a diff), capped at `max_bytes`.
+    pub async fn get_text(
+        &self,
+        path: &str,
+        accept: &'static str,
+        max_bytes: usize,
+    ) -> Result<String, ForgeError> {
+        let url = self.url(path)?;
+        let response = self.execute(Method::GET, url, accept, None).await?;
+        if response
+            .content_length()
+            .is_some_and(|len| len > max_bytes as u64)
+        {
+            return Err(ForgeError::InvalidResponse(format!(
+                "{path}: response is larger than {max_bytes} bytes"
+            )));
+        }
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|e| ForgeError::Network(e.without_url().to_string()))?;
+        if bytes.len() > max_bytes {
+            return Err(ForgeError::InvalidResponse(format!(
+                "{path}: response is larger than {max_bytes} bytes"
+            )));
+        }
+        String::from_utf8(bytes.to_vec())
+            .map_err(|_| ForgeError::InvalidResponse(format!("{path}: response is not UTF-8")))
+    }
+
+    /// Runs a GraphQL query. Mutations are refused for read-only accounts;
+    /// queries are reads even though they are sent with `POST`.
+    pub async fn graphql<T: DeserializeOwned>(
+        &self,
+        query: &str,
+        variables: serde_json::Value,
+    ) -> Result<T, ForgeError> {
+        guard_graphql(query, self.options)?;
+        let url = self.host.graphql().clone();
+        let body = serde_json::json!({ "query": query, "variables": variables });
+        let response = self.execute(Method::POST, url, JSON, Some(&body)).await?;
+        let reply: GraphqlReply<T> = decode(response, "graphql").await?;
+        match (reply.data, reply.errors.unwrap_or_default()) {
+            (Some(data), errors) => {
+                for error in &errors {
+                    // Partial results, e.g. orgs that need SSO; keep the data.
+                    tracing::warn!(message = %error.message, kind = ?error.kind, "graphql partial error");
+                }
+                Ok(data)
+            }
+            (None, errors) => Err(errors
+                .into_iter()
+                .next()
+                .map(GraphqlError::into_forge_error)
+                .unwrap_or_else(|| {
+                    ForgeError::InvalidResponse("graphql: no data and no errors".to_owned())
+                })),
+        }
+    }
+
+    async fn execute(
+        &self,
+        method: Method,
+        url: Url,
+        accept: &'static str,
+        body: Option<&serde_json::Value>,
+    ) -> Result<Response, ForgeError> {
         let mut auth = HeaderValue::from_str(&format!("Bearer {}", self.token.expose()))
             .map_err(|_| ForgeError::Unauthorized)?;
         auth.set_sensitive(true);
 
-        let response = self
+        let mut request = self
             .http
             .request(method, url)
             .header(header::AUTHORIZATION, auth)
-            .header(header::ACCEPT, "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", API_VERSION)
+            .header(header::ACCEPT, accept)
+            .header("X-GitHub-Api-Version", API_VERSION);
+        if let Some(body) = body {
+            request = request.json(body);
+        }
+        let response = request
             .send()
             .await
             .map_err(|e| ForgeError::Network(e.without_url().to_string()))?;

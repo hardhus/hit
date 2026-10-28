@@ -1,0 +1,6 @@
+query Search($q: String!, $first: Int!, $after: String) {
+  search(query: $q, type: ISSUE, first: $first, after: $after) {
+    pageInfo { hasNextPage endCursor }
+    nodes { __typename ...Pr ...Iss }
+  }
+}

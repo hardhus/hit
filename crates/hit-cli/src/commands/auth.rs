@@ -52,6 +52,7 @@ async fn login(args: &LoginArgs, config: &Config, paths: &Paths) -> Result<ExitC
         read_only: args.read_only || config.auth.read_only,
         allow_mark_read: config.auth.allow_mark_read,
         storage,
+        focus: accounts::focus_options(config),
     };
 
     if storage == LoginStorage::Keyring {
