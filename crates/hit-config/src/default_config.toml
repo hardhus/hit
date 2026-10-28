@@ -1,0 +1,24 @@
+# hit configuration
+#
+# Every key is optional; anything left out uses the default shown here.
+# Run `hit config check` after editing to see warnings.
+
+[general]
+
+[ui]
+# Keep the terminal background visible behind hit.
+transparent = true
+# Color theme. Available: "jinx"
+theme = "jinx"
+# Small animations (logo shimmer, spinners, transitions).
+animations = true
+# Frame cap while something is animating (1-240). Idle screens are not redrawn.
+max_fps = 60
+
+[log]
+# One of: off, error, warn, info, debug, trace. HIT_LOG overrides this.
+level = "info"
+# Log files older than this many days are deleted on startup (1-3650).
+retention_days = 14
+# Oldest log files are deleted on startup until the total is below this (1-10240).
+max_total_mb = 50

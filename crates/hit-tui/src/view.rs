@@ -1,0 +1,58 @@
+use std::time::Instant;
+
+use ratatui::{Frame, layout::Rect};
+use tokio::sync::mpsc;
+
+use crate::{Action, Event, Theme};
+
+/// Shared, read-mostly context handed to every view.
+pub struct Ctx {
+    pub theme: Theme,
+    pub animations: bool,
+    started: Instant,
+    tx: mpsc::UnboundedSender<Action>,
+}
+
+impl Ctx {
+    pub fn new(theme: Theme, animations: bool, tx: mpsc::UnboundedSender<Action>) -> Self {
+        Self {
+            theme,
+            animations,
+            started: Instant::now(),
+            tx,
+        }
+    }
+
+    /// Seconds since the app started; drives animations.
+    pub fn time(&self) -> f32 {
+        self.started.elapsed().as_secs_f32()
+    }
+
+    /// Channel for actions produced outside input handling (background tasks).
+    pub fn sender(&self) -> mpsc::UnboundedSender<Action> {
+        self.tx.clone()
+    }
+}
+
+/// A screen on the view stack. Kept deliberately small; extend as the UX grows.
+pub trait View {
+    /// Handles input. Unhandled input returns `None` and falls through to the
+    /// app's global keys.
+    fn handle_event(&mut self, event: &Event, ctx: &Ctx) -> Option<Action> {
+        let _ = (event, ctx);
+        None
+    }
+
+    /// Reacts to an action the app did not consume itself.
+    fn update(&mut self, action: &Action, ctx: &Ctx) -> Option<Action> {
+        let _ = (action, ctx);
+        None
+    }
+
+    fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx);
+
+    /// While any view animates, the app redraws at the configured frame cap.
+    fn is_animating(&self) -> bool {
+        false
+    }
+}
