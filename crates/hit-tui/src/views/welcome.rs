@@ -1,11 +1,11 @@
 //! Temporary start screen. Replaced by the Action Required view in F5.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
+use crossterm::event::KeyCode;
 use hit_core::{
-    Forge, ForgeError,
+    ForgeError,
     focus::{FocusItem, FocusReason},
-    query::{NotificationQuery, PageRequest, Scope},
 };
 use ratatui::{
     Frame,
@@ -14,8 +14,12 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, BorderType, Paragraph, Wrap},
 };
+use tokio::task::JoinHandle;
 
-use crate::{Action, Ctx, DataEvent, Event, View};
+use crate::{
+    Action, Ctx, DataEvent, Event, View,
+    sync::{self, Loaded},
+};
 
 const LOGO: [&str; 6] = [
     "██╗  ██╗ ██╗ ████████╗",
@@ -29,8 +33,6 @@ const LOGO_WIDTH: u16 = 22;
 /// Gradient cycles per second.
 const SHIMMER_SPEED: f32 = 0.12;
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-/// Upper bound on notification pages fetched just to count unread ones.
-const MAX_UNREAD_PAGES: usize = 10;
 
 const COMING: [(&str, &str); 4] = [
     (
@@ -42,25 +44,27 @@ const COMING: [(&str, &str); 4] = [
     ("Issues", "find, read and triage"),
 ];
 
-/// A taste of the user's day, fetched in the background.
+/// The user's day: last known data, how old it is, and whether a refresh
+/// is running or failed.
+#[derive(Default)]
+struct Day {
+    focus: Option<Loaded<Arc<Vec<FocusItem>>>>,
+    unread: Option<Loaded<usize>>,
+    error: Option<ForgeError>,
+    refreshing: bool,
+}
+
 enum Summary {
     NoAccount,
-    /// Signed in, but the forge cannot report Action Required yet.
+    /// Signed in, but the forge cannot report Action Required.
     SignedIn(String),
-    Loading {
-        focus: Option<Arc<Vec<FocusItem>>>,
-        unread: Option<usize>,
-    },
-    Ready {
-        focus: Arc<Vec<FocusItem>>,
-        unread: usize,
-    },
-    Failed(ForgeError),
+    Day(Day),
 }
 
 pub struct Welcome {
     warnings: Vec<String>,
     summary: Summary,
+    tasks: Vec<JoinHandle<()>>,
 }
 
 impl Welcome {
@@ -68,27 +72,35 @@ impl Welcome {
         Self {
             warnings,
             summary: Summary::NoAccount,
+            tasks: Vec::new(),
+        }
+    }
+
+    fn stop_tasks(&mut self) {
+        for task in self.tasks.drain(..) {
+            task.abort();
         }
     }
 
     fn on_data(&mut self, event: &DataEvent) {
-        let Summary::Loading { focus, unread } = &mut self.summary else {
+        let Summary::Day(day) = &mut self.summary else {
             return;
         };
         match event {
-            DataEvent::Focus(Ok(items)) => *focus = Some(Arc::clone(items)),
-            DataEvent::UnreadCount(Ok(count)) => *unread = Some(*count),
-            DataEvent::Focus(Err(e)) | DataEvent::UnreadCount(Err(e)) => {
-                self.summary = Summary::Failed(e.clone());
-                return;
+            DataEvent::Refreshing => day.refreshing = true,
+            DataEvent::Focus(Ok(loaded)) => {
+                if loaded.fresh {
+                    day.error = None;
+                    day.refreshing = false;
+                }
+                day.focus = Some(loaded.clone());
             }
-            DataEvent::Login(_) => return,
-        }
-        if let (Some(focus), Some(unread)) = (focus.as_ref(), *unread) {
-            self.summary = Summary::Ready {
-                focus: Arc::clone(focus),
-                unread,
-            };
+            DataEvent::UnreadCount(Ok(loaded)) => day.unread = Some(loaded.clone()),
+            DataEvent::Focus(Err(e)) | DataEvent::UnreadCount(Err(e)) => {
+                day.error = Some(e.clone());
+                day.refreshing = false;
+            }
+            DataEvent::Login(_) => {}
         }
     }
 
@@ -107,6 +119,15 @@ impl Welcome {
                     .gradient_line(text, usize::from(LOGO_WIDTH) * 2, row_phase)
             })
             .collect()
+    }
+
+    fn spinner(ctx: &Ctx) -> &'static str {
+        let frame = if ctx.animations {
+            (ctx.time() * 12.0) as usize % SPINNER.len()
+        } else {
+            0
+        };
+        SPINNER.get(frame).copied().unwrap_or("·")
     }
 
     fn summary_line(&self, ctx: &Ctx) -> Line<'static> {
@@ -129,64 +150,97 @@ impl Welcome {
                 Span::styled("✓ ", bold(t.success)),
                 Span::styled("signed in as ", Style::new().fg(t.fg)),
                 Span::styled(account.clone(), bold(t.accent_alt)),
-                Span::styled(
-                    " · your data arrives in the next update",
-                    Style::new().fg(t.muted),
-                ),
             ]),
-            Summary::Loading { .. } => {
-                let frame = if ctx.animations {
-                    (ctx.time() * 12.0) as usize % SPINNER.len()
-                } else {
-                    0
-                };
-                Line::from(vec![
-                    Span::styled(SPINNER.get(frame).copied().unwrap_or("·"), bold(t.accent)),
-                    Span::styled(" loading your day…", Style::new().fg(t.muted)),
-                ])
-            }
-            Summary::Failed(e) => Line::from(vec![
-                Span::styled("! ", bold(t.danger)),
-                Span::styled(
-                    format!("couldn't load your day: {e}"),
-                    Style::new().fg(t.danger),
-                ),
-            ]),
-            Summary::Ready { focus, unread } => {
-                let count = |reason| focus.iter().filter(|i| i.has(reason)).count();
-                let parts = [
-                    (count(FocusReason::ReviewRequested), "to review", t.accent),
-                    (count(FocusReason::ChecksFailing), "CI failing", t.danger),
-                    (
-                        count(FocusReason::ChangesRequested),
-                        "changes requested",
-                        t.warning,
-                    ),
-                    (
-                        count(FocusReason::ReadyToMerge),
-                        "ready to merge",
-                        t.success,
-                    ),
-                    (count(FocusReason::Mentioned), "mentions", t.info),
-                    (count(FocusReason::Assigned), "assigned", t.highlight),
-                    (*unread, "unread", t.accent_alt),
-                ];
-                let mut spans = Vec::new();
-                for (n, label, color) in parts.into_iter().filter(|(n, ..)| *n > 0) {
-                    if !spans.is_empty() {
-                        spans.push(Span::styled(" · ", Style::new().fg(t.border)));
+            Summary::Day(day) => match (&day.focus, &day.error) {
+                (Some(focus), _) => {
+                    let count = |reason| focus.value.iter().filter(|i| i.has(reason)).count();
+                    let parts = [
+                        (count(FocusReason::ReviewRequested), "to review", t.accent),
+                        (count(FocusReason::ChecksFailing), "CI failing", t.danger),
+                        (
+                            count(FocusReason::ChangesRequested),
+                            "changes requested",
+                            t.warning,
+                        ),
+                        (
+                            count(FocusReason::ReadyToMerge),
+                            "ready to merge",
+                            t.success,
+                        ),
+                        (count(FocusReason::Mentioned), "mentions", t.info),
+                        (count(FocusReason::Assigned), "assigned", t.highlight),
+                        (
+                            day.unread.as_ref().map_or(0, |u| u.value),
+                            "unread",
+                            t.accent_alt,
+                        ),
+                    ];
+                    let mut spans = Vec::new();
+                    for (n, label, color) in parts.into_iter().filter(|(n, ..)| *n > 0) {
+                        if !spans.is_empty() {
+                            spans.push(Span::styled(" · ", Style::new().fg(t.border)));
+                        }
+                        spans.push(Span::styled(n.to_string(), bold(color)));
+                        spans.push(Span::styled(format!(" {label}"), Style::new().fg(t.fg)));
                     }
-                    spans.push(Span::styled(n.to_string(), bold(color)));
-                    spans.push(Span::styled(format!(" {label}"), Style::new().fg(t.fg)));
+                    if spans.is_empty() {
+                        spans.push(Span::styled(
+                            "all clear, nothing needs you ✨",
+                            bold(t.success),
+                        ));
+                    }
+                    Line::from(spans)
                 }
-                if spans.is_empty() {
-                    spans.push(Span::styled(
-                        "all clear, nothing needs you ✨",
-                        bold(t.success),
-                    ));
-                }
-                Line::from(spans)
-            }
+                (None, Some(e)) => Line::from(vec![
+                    Span::styled("! ", bold(t.danger)),
+                    Span::styled(
+                        format!("couldn't load your day: {e}"),
+                        Style::new().fg(t.danger),
+                    ),
+                ]),
+                (None, None) => Line::from(vec![
+                    Span::styled(Self::spinner(ctx), bold(t.accent)),
+                    Span::styled(" loading your day…", Style::new().fg(t.muted)),
+                ]),
+            },
+        }
+    }
+
+    /// How fresh the summary is: refreshing, offline with old data, or when
+    /// it was last updated. Never animates the text itself.
+    fn status_line(&self, ctx: &Ctx) -> Line<'static> {
+        let t = &ctx.theme;
+        let muted = Style::new().fg(t.muted);
+        let Summary::Day(Day {
+            focus: Some(focus),
+            error,
+            refreshing,
+            ..
+        }) = &self.summary
+        else {
+            return Line::raw("");
+        };
+        let age = sync::ago(focus.fetched_at);
+        if *refreshing {
+            Line::from(vec![
+                Span::styled(Self::spinner(ctx), Style::new().fg(t.accent)),
+                Span::styled(format!(" refreshing · updated {age}"), muted),
+            ])
+        } else if let Some(e) = error {
+            Line::from(vec![
+                Span::styled(
+                    "! ",
+                    Style::new().fg(t.warning).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("couldn't refresh ({e}) · showing data from {age}"),
+                    Style::new().fg(t.warning),
+                ),
+            ])
+        } else if focus.fresh {
+            Line::styled(format!("updated {age}"), muted)
+        } else {
+            Line::styled(format!("cached · {age}"), muted)
         }
     }
 
@@ -225,7 +279,7 @@ impl Welcome {
             .border_type(BorderType::Rounded)
             .border_style(Style::new().fg(t.warning))
             .title(Span::styled(
-                " config warnings ",
+                " warnings ",
                 Style::new().fg(t.warning).add_modifier(Modifier::BOLD),
             ))
             .title_bottom(Span::styled(" hit config check ", Style::new().fg(t.muted)));
@@ -271,77 +325,66 @@ impl Welcome {
         if self.can_sign_in(ctx) {
             spans.extend([key("l"), label("sign in")]);
         }
+        if matches!(self.summary, Summary::Day(_)) {
+            spans.extend([key("r"), label("refresh")]);
+        }
         spans.extend([key("q"), label("quit"), key("ctrl+c"), label("quit")]);
         Line::from(spans)
     }
 }
 
-/// Fetches the Action Required items and the unread count, reporting each
-/// through the action channel.
-fn spawn_summary(forge: Arc<dyn Forge>, ctx: &Ctx) {
-    let tx = ctx.sender();
-    tokio::spawn(async move {
-        let focus = match forge.focus() {
-            Some(focus) => focus.items(&Scope::All).await.map(Arc::new),
-            None => Err(ForgeError::Unsupported("Action Required")),
-        };
-        let _ = tx.send(Action::Data(DataEvent::Focus(focus)));
-
-        let unread = match forge.notifications() {
-            Some(notifications) => count_unread(notifications).await,
-            None => Ok(0),
-        };
-        let _ = tx.send(Action::Data(DataEvent::UnreadCount(unread)));
-    });
-}
-
-async fn count_unread(notifications: &dyn hit_core::Notifications) -> Result<usize, ForgeError> {
-    let query = NotificationQuery {
-        unread_only: true,
-        ..NotificationQuery::default()
-    };
-    let mut page = PageRequest::first(100);
-    let mut total = 0;
-    for _ in 0..MAX_UNREAD_PAGES {
-        let result = notifications.list(&query, &page).await?;
-        total += result.items.len();
-        match result.next {
-            Some(cursor) => page = PageRequest::after(cursor, 100),
-            None => break,
-        }
+impl Drop for Welcome {
+    fn drop(&mut self) {
+        self.stop_tasks();
     }
-    Ok(total)
 }
 
 impl View for Welcome {
     fn mount(&mut self, ctx: &Ctx) {
+        self.stop_tasks();
         // Summarizing several accounts together comes with the Action
         // Required screen (F5); for now the first account is shown.
-        self.summary = match ctx.forges.iter().next() {
-            None => Summary::NoAccount,
-            Some(forge) if forge.focus().is_none() => {
-                Summary::SignedIn(format!("@{}", forge.account().login))
-            }
-            Some(forge) => {
-                spawn_summary(Arc::clone(forge), ctx);
-                Summary::Loading {
-                    focus: None,
-                    unread: None,
-                }
-            }
+        let Some(forge) = ctx.forges.iter().next() else {
+            self.summary = Summary::NoAccount;
+            return;
         };
+        if forge.focus().is_none() {
+            self.summary = Summary::SignedIn(format!("@{}", forge.account().login));
+            return;
+        }
+        // Keep what is on screen while refreshing again.
+        if !matches!(self.summary, Summary::Day(_)) {
+            self.summary = Summary::Day(Day::default());
+        }
+        let every = match ctx.refresh.focus_minutes {
+            0 => None,
+            minutes => Some(Duration::from_secs(u64::from(minutes) * 60)),
+        };
+        self.tasks = vec![
+            sync::spawn_focus(Arc::clone(forge), ctx.cache.clone(), every, ctx.sender()),
+            sync::spawn_unread(
+                Arc::clone(forge),
+                ctx.cache.clone(),
+                ctx.refresh.notifications,
+                ctx.sender(),
+            ),
+        ];
     }
 
     fn handle_event(&mut self, event: &Event, ctx: &Ctx) -> Option<Action> {
         #[cfg(debug_assertions)]
         debug_panic(event);
-        if let Event::Key(key) = event
-            && key.code == crossterm::event::KeyCode::Char('l')
-            && self.can_sign_in(ctx)
-        {
-            return Some(Action::OpenLogin);
+        let Event::Key(key) = event else {
+            return None;
+        };
+        match key.code {
+            KeyCode::Char('l') if self.can_sign_in(ctx) => Some(Action::OpenLogin),
+            KeyCode::Char('r') if matches!(self.summary, Summary::Day(_)) => {
+                self.mount(ctx);
+                Some(Action::Redraw)
+            }
+            _ => None,
         }
-        None
     }
 
     fn update(&mut self, action: &Action, _ctx: &Ctx) -> Option<Action> {
@@ -368,13 +411,25 @@ impl View for Welcome {
 
         let [body, hints] =
             Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(area);
-        let [logo, tagline, version, _, summary, _, coming, _, warnings] = Layout::vertical([
+        let [
+            logo,
+            tagline,
+            version,
+            _,
+            summary,
+            status,
+            _,
+            coming,
+            _,
+            warnings,
+        ] = Layout::vertical([
             Constraint::Length(LOGO.len() as u16),
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(1),
             // The summary wraps onto a second line in narrow terminals.
             Constraint::Length(2),
+            Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(COMING.len() as u16),
             Constraint::Length(1),
@@ -416,6 +471,10 @@ impl View for Welcome {
                 .wrap(Wrap { trim: true }),
             summary,
         );
+        frame.render_widget(
+            Paragraph::new(self.status_line(ctx)).alignment(Alignment::Center),
+            status,
+        );
 
         let [coming] = Layout::horizontal([Constraint::Length(68)])
             .flex(Flex::Center)
@@ -445,7 +504,6 @@ impl View for Welcome {
 #[cfg(debug_assertions)]
 #[allow(clippy::panic)]
 fn debug_panic(event: &Event) {
-    use crossterm::event::KeyCode;
     let Event::Key(key) = event else { return };
     if std::env::var_os("HIT_DEBUG_PANIC").is_none() {
         return;
@@ -461,30 +519,24 @@ fn debug_panic(event: &Event) {
 
 #[cfg(test)]
 mod tests {
-    use hit_core::Forges;
+    use hit_core::{Forges, Timestamp};
     use hit_forge_mock::{MockForge, MockOptions};
     use ratatui::{Terminal, backend::TestBackend};
-    use tokio::sync::mpsc;
 
     use super::*;
-    use crate::Theme;
+    use crate::Services;
 
-    fn ctx(forges: Forges) -> (Ctx, mpsc::UnboundedReceiver<Action>) {
-        let (tx, rx) = mpsc::unbounded_channel();
-        (
-            Ctx::new(Theme::jinx(true, true), false, forges, None, tx),
-            rx,
-        )
-    }
-
-    fn demo_forges() -> Forges {
+    fn demo_services() -> Services {
         let mut forges = Forges::new();
         forges.add(Arc::new(MockForge::demo(MockOptions::instant())));
-        forges
+        Services {
+            forges,
+            ..Services::default()
+        }
     }
 
     fn render_to_string(view: &mut Welcome, ctx: &Ctx) -> String {
-        let mut terminal = Terminal::new(TestBackend::new(110, 32)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(110, 34)).unwrap();
         terminal
             .draw(|frame| view.render(frame, frame.area(), ctx))
             .unwrap();
@@ -497,9 +549,28 @@ mod tests {
             .join("\n")
     }
 
+    fn day_view(focus: Option<Loaded<Arc<Vec<FocusItem>>>>) -> Welcome {
+        let mut view = Welcome::new(Vec::new());
+        view.summary = Summary::Day(Day {
+            focus,
+            ..Day::default()
+        });
+        view
+    }
+
+    fn loaded<T>(value: T, minutes_ago: i64, fresh: bool) -> Loaded<T> {
+        Loaded {
+            value,
+            fetched_at: Timestamp::now()
+                .checked_sub(jiff::SignedDuration::from_mins(minutes_ago))
+                .unwrap(),
+            fresh,
+        }
+    }
+
     #[test]
     fn shows_logo_tagline_hints_and_sign_in_hint() {
-        let (ctx, _rx) = ctx(Forges::new());
+        let (ctx, _rx) = Ctx::for_tests(Services::default());
         let mut view = Welcome::new(Vec::new());
         view.mount(&ctx);
         let screen = render_to_string(&mut view, &ctx);
@@ -508,47 +579,73 @@ mod tests {
         assert!(screen.contains("quit"));
         assert!(screen.contains("hit --demo"));
         assert!(!screen.contains("DEMO"));
-        assert!(!screen.contains("config warnings"));
+        assert!(!screen.contains("refresh"));
+        assert!(!screen.contains("warnings"));
     }
 
     #[test]
     fn shows_config_warnings() {
-        let (ctx, _rx) = ctx(Forges::new());
+        let (ctx, _rx) = Ctx::for_tests(Services::default());
         let mut view = Welcome::new(vec!["unknown key ui.colour; ignored".into()]);
         let screen = render_to_string(&mut view, &ctx);
-        assert!(screen.contains("config warnings"));
+        assert!(screen.contains("warnings"));
         assert!(screen.contains("ui.colour"));
     }
 
     #[tokio::test]
     async fn demo_loads_summary_in_background() {
-        let (ctx, mut rx) = ctx(demo_forges());
+        let (ctx, mut rx) = Ctx::for_tests(demo_services());
         let mut view = Welcome::new(Vec::new());
         view.mount(&ctx);
 
         let screen = render_to_string(&mut view, &ctx);
         assert!(screen.contains("DEMO"));
         assert!(screen.contains("loading your day"));
+        assert!(screen.contains("refresh"));
 
-        for _ in 0..2 {
+        let (mut focus, mut unread) = (false, false);
+        while !(focus && unread) {
             let action = rx.recv().await.unwrap();
+            focus |= matches!(action, Action::Data(DataEvent::Focus(Ok(_))));
+            unread |= matches!(action, Action::Data(DataEvent::UnreadCount(Ok(_))));
             view.update(&action, &ctx);
         }
         let screen = render_to_string(&mut view, &ctx);
         assert!(screen.contains("to review"), "{screen}");
         assert!(screen.contains("CI failing"));
         assert!(screen.contains("unread"));
+        assert!(screen.contains("updated just now"));
         assert!(!screen.contains("loading your day"));
     }
 
     #[test]
-    fn errors_are_shown() {
-        let (ctx, _rx) = ctx(Forges::new());
-        let mut view = Welcome::new(Vec::new());
-        view.summary = Summary::Loading {
-            focus: None,
-            unread: None,
-        };
+    fn freshness_is_always_visible() {
+        let (ctx, _rx) = Ctx::for_tests(Services::default());
+        let items = Arc::new(Vec::new());
+
+        let mut cached = day_view(Some(loaded(Arc::clone(&items), 42, false)));
+        let screen = render_to_string(&mut cached, &ctx);
+        assert!(screen.contains("all clear"));
+        assert!(screen.contains("cached · 42m ago"), "{screen}");
+
+        let mut offline = day_view(Some(loaded(Arc::clone(&items), 180, true)));
+        offline.on_data(&DataEvent::Focus(Err(ForgeError::Network(
+            "offline".into(),
+        ))));
+        let screen = render_to_string(&mut offline, &ctx);
+        assert!(screen.contains("all clear"), "old data stays visible");
+        assert!(screen.contains("showing data from 3h ago"), "{screen}");
+
+        let mut refreshing = day_view(Some(loaded(items, 5, true)));
+        refreshing.on_data(&DataEvent::Refreshing);
+        let screen = render_to_string(&mut refreshing, &ctx);
+        assert!(screen.contains("refreshing · updated 5m ago"), "{screen}");
+    }
+
+    #[test]
+    fn errors_without_data_are_shown() {
+        let (ctx, _rx) = Ctx::for_tests(Services::default());
+        let mut view = day_view(None);
         view.on_data(&DataEvent::Focus(Err(ForgeError::Network(
             "offline".into(),
         ))));

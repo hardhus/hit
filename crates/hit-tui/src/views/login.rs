@@ -298,7 +298,6 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
-    use crate::Theme;
 
     struct FakeFlow(Host);
 
@@ -327,15 +326,7 @@ mod tests {
     }
 
     fn ctx() -> (Ctx, mpsc::UnboundedReceiver<Action>) {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let ctx = Ctx::new(
-            Theme::jinx(true, true),
-            false,
-            hit_core::Forges::new(),
-            None,
-            tx,
-        );
-        (ctx, rx)
+        Ctx::for_tests(crate::Services::default())
     }
 
     #[test]

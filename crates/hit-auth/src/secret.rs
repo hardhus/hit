@@ -1,6 +1,8 @@
 use std::fmt;
 
+use hmac::{Hmac, Mac};
 use secrecy::{ExposeSecret, SecretString};
+use sha2::Sha256;
 
 /// A token or other credential. Never printed: `Debug` is redacted, there is
 /// no `Display` or `Serialize`, and the memory is zeroed on drop.
@@ -41,6 +43,26 @@ impl Secret {
     pub fn expose(&self) -> &str {
         self.0.expose_secret()
     }
+
+    /// A 32-byte key derived from this secret with HKDF-SHA256 (RFC 5869),
+    /// bound to `context`. One-way: the key never reveals the secret, and
+    /// different contexts give unrelated keys. Used to encrypt local data
+    /// with the account's own credential (no extra password or key to store).
+    pub fn derive_key(&self, context: &str) -> [u8; 32] {
+        type HmacSha256 = Hmac<Sha256>;
+        let mac = |key: &[u8], parts: &[&[u8]]| -> [u8; 32] {
+            // HMAC accepts keys of any length, so this cannot fail.
+            let Ok(mut mac) = HmacSha256::new_from_slice(key) else {
+                return [0; 32];
+            };
+            for part in parts {
+                mac.update(part);
+            }
+            mac.finalize().into_bytes().into()
+        };
+        let prk = mac(b"hit/hkdf-salt/v1", &[self.expose().as_bytes()]);
+        mac(&prk, &[context.as_bytes(), &[1]])
+    }
 }
 
 impl fmt::Debug for Secret {
@@ -59,6 +81,17 @@ mod tests {
         let debug = format!("{secret:?} {:?}", Some(&secret));
         assert!(!debug.contains("supersecret"), "{debug}");
         assert_eq!(secret.expose(), "gho_supersecret");
+    }
+
+    #[test]
+    fn derived_keys_depend_on_secret_and_context() {
+        let a = Secret::new("gho_one").unwrap();
+        let b = Secret::new("gho_two").unwrap();
+        assert_eq!(a.derive_key("cache"), a.derive_key("cache"));
+        assert_ne!(a.derive_key("cache"), a.derive_key("other"));
+        assert_ne!(a.derive_key("cache"), b.derive_key("cache"));
+        // RFC 5869-style output, not the secret itself.
+        assert!(!a.derive_key("cache").windows(7).any(|w| w == b"gho_one"));
     }
 
     #[test]

@@ -3,10 +3,16 @@
 //! account's API origin, only in the `Authorization` header (marked
 //! sensitive), and read-only accounts cannot write.
 
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, MutexGuard, PoisonError},
+    time::Duration,
+};
+
 use hit_auth::Secret;
 use hit_core::{AccessHint, ForgeError, Timestamp};
 use reqwest::{
-    Client, Method, Response, StatusCode,
+    Client, Method, RequestBuilder, Response, StatusCode,
     header::{self, HeaderMap, HeaderValue},
 };
 use serde::{Deserialize, de::DeserializeOwned};
@@ -98,6 +104,48 @@ pub struct Api {
     host: GithubHost,
     token: Secret,
     options: ApiOptions,
+    /// Validators and bodies of recent conditional `GET`s, by URL.
+    conditional: Arc<Mutex<HashMap<String, Stored>>>,
+}
+
+/// Upper bound on remembered conditional responses.
+const MAX_CONDITIONAL: usize = 64;
+
+#[derive(Debug, Clone)]
+struct Stored {
+    etag: Option<HeaderValue>,
+    last_modified: Option<HeaderValue>,
+    body: Vec<u8>,
+    next_page: Option<u32>,
+    poll_interval: Option<Duration>,
+}
+
+/// The result of a conditional `GET`.
+#[derive(Debug, Clone)]
+pub struct Fetched {
+    pub body: Vec<u8>,
+    pub next_page: Option<u32>,
+    /// `X-Poll-Interval`: how often the server wants to be asked.
+    pub poll_interval: Option<Duration>,
+    /// The server answered `304`; `body` is the stored copy.
+    pub not_modified: bool,
+}
+
+impl Fetched {
+    pub fn json<T: DeserializeOwned>(&self, what: &str) -> Result<T, ForgeError> {
+        serde_json::from_slice(&self.body)
+            .map_err(|e| ForgeError::InvalidResponse(format!("{what}: {e}")))
+    }
+}
+
+fn poll_interval(headers: &HeaderMap) -> Option<Duration> {
+    headers
+        .get("x-poll-interval")?
+        .to_str()
+        .ok()?
+        .parse::<u64>()
+        .ok()
+        .map(|s| Duration::from_secs(s.clamp(1, 3600)))
 }
 
 impl Api {
@@ -107,6 +155,7 @@ impl Api {
             host,
             token,
             options,
+            conditional: Arc::default(),
         }
     }
 
@@ -118,6 +167,19 @@ impl Api {
         self.options
     }
 
+    /// Key for encrypting this account's local cache, derived from the token
+    /// (never the token itself). Changes when the token changes.
+    pub(crate) fn local_key(&self) -> zeroize::Zeroizing<[u8; 32]> {
+        local_key(&self.token, &self.host)
+    }
+}
+
+/// The local-cache key for an account on `host`, derived from its token.
+pub fn local_key(token: &Secret, host: &GithubHost) -> zeroize::Zeroizing<[u8; 32]> {
+    zeroize::Zeroizing::new(token.derive_key(&format!("hit/local-cache/v1/{}", host.host())))
+}
+
+impl Api {
     pub async fn get(&self, path: &str) -> Result<Response, ForgeError> {
         self.send(Method::GET, path, Op::Read).await
     }
@@ -207,6 +269,97 @@ impl Api {
         }
     }
 
+    /// `GET` that revalidates with `If-None-Match` / `If-Modified-Since`.
+    /// A `304` (which GitHub does not count against the rate limit) returns
+    /// the body stored from the previous response.
+    pub async fn get_conditional(&self, path: &str) -> Result<Fetched, ForgeError> {
+        let url = self.url(path)?;
+        let key = url.to_string();
+        let stored = self.lock_conditional().get(&key).cloned();
+
+        let mut request = self.request(Method::GET, url, JSON)?;
+        if let Some(stored) = &stored {
+            if let Some(etag) = &stored.etag {
+                request = request.header(header::IF_NONE_MATCH, etag.clone());
+            }
+            if let Some(modified) = &stored.last_modified {
+                request = request.header(header::IF_MODIFIED_SINCE, modified.clone());
+            }
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|e| ForgeError::Network(e.without_url().to_string()))?;
+
+        if response.status() == StatusCode::NOT_MODIFIED
+            && let Some(stored) = stored
+        {
+            return Ok(Fetched {
+                // GitHub may raise the poll interval under load; prefer the new one.
+                poll_interval: poll_interval(response.headers()).or(stored.poll_interval),
+                body: stored.body,
+                next_page: stored.next_page,
+                not_modified: true,
+            });
+        }
+
+        let response = check(response).await?;
+        let headers = response.headers().clone();
+        let body = response
+            .bytes()
+            .await
+            .map_err(|e| ForgeError::Network(e.without_url().to_string()))?
+            .to_vec();
+        let fetched = Fetched {
+            body,
+            next_page: next_page(&headers),
+            poll_interval: poll_interval(&headers),
+            not_modified: false,
+        };
+        let etag = headers.get(header::ETAG).cloned();
+        let last_modified = headers.get(header::LAST_MODIFIED).cloned();
+        if etag.is_some() || last_modified.is_some() {
+            let mut map = self.lock_conditional();
+            if map.len() >= MAX_CONDITIONAL && !map.contains_key(&key) {
+                map.clear();
+            }
+            map.insert(
+                key,
+                Stored {
+                    etag,
+                    last_modified,
+                    body: fetched.body.clone(),
+                    next_page: fetched.next_page,
+                    poll_interval: fetched.poll_interval,
+                },
+            );
+        }
+        Ok(fetched)
+    }
+
+    fn lock_conditional(&self) -> MutexGuard<'_, HashMap<String, Stored>> {
+        self.conditional
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn request(
+        &self,
+        method: Method,
+        url: Url,
+        accept: &'static str,
+    ) -> Result<RequestBuilder, ForgeError> {
+        let mut auth = HeaderValue::from_str(&format!("Bearer {}", self.token.expose()))
+            .map_err(|_| ForgeError::Unauthorized)?;
+        auth.set_sensitive(true);
+        Ok(self
+            .http
+            .request(method, url)
+            .header(header::AUTHORIZATION, auth)
+            .header(header::ACCEPT, accept)
+            .header("X-GitHub-Api-Version", API_VERSION))
+    }
+
     async fn execute(
         &self,
         method: Method,
@@ -214,16 +367,7 @@ impl Api {
         accept: &'static str,
         body: Option<&serde_json::Value>,
     ) -> Result<Response, ForgeError> {
-        let mut auth = HeaderValue::from_str(&format!("Bearer {}", self.token.expose()))
-            .map_err(|_| ForgeError::Unauthorized)?;
-        auth.set_sensitive(true);
-
-        let mut request = self
-            .http
-            .request(method, url)
-            .header(header::AUTHORIZATION, auth)
-            .header(header::ACCEPT, accept)
-            .header("X-GitHub-Api-Version", API_VERSION);
+        let mut request = self.request(method, url, accept)?;
         if let Some(body) = body {
             request = request.json(body);
         }

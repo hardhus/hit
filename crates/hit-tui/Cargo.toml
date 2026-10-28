@@ -13,6 +13,9 @@ crossterm.workspace = true
 futures.workspace = true
 hit-config.workspace = true
 hit-core.workspace = true
+hit-cache.workspace = true
+serde.workspace = true
+jiff.workspace = true
 arboard.workspace = true
 open.workspace = true
 async-trait.workspace = true
@@ -28,4 +31,3 @@ workspace = true
 [dev-dependencies]
 hit-forge-mock.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "test-util"] }
-jiff.workspace = true

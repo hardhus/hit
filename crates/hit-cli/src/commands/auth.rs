@@ -212,7 +212,13 @@ fn logout(
         }
     };
 
-    let removed = accounts::store(account.storage, paths)
+    // The cache key comes from the token, so clear the cache before the
+    // token is gone (without it the data is unreadable anyway).
+    let store = accounts::store(account.storage, paths);
+    if let Ok(Some(token)) = store.get(&account.key()) {
+        accounts::clear_account_cache(&account, &token, paths);
+    }
+    let removed = store
         .delete(&account.key())
         .wrap_err("could not remove the stored token")?;
     all.remove(&account.key());

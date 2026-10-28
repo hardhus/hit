@@ -2,12 +2,11 @@ use std::{sync::Arc, time::Duration};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use hit_config::Config;
-use hit_core::{Forges, auth::LoginFlow};
 use ratatui::{Frame, widgets::Block};
 use tokio::{sync::mpsc, time::MissedTickBehavior};
 
 use crate::{
-    Action, Ctx, Event, Theme, TuiError, View,
+    Action, Ctx, Event, Services, Theme, TuiError, View,
     event::EventSource,
     terminal::{self, Term, TerminalGuard},
     views::{LoginView, Welcome},
@@ -17,10 +16,9 @@ use crate::{
 pub async fn run(
     config: &Config,
     warnings: Vec<String>,
-    forges: Forges,
-    login: Option<Arc<dyn LoginFlow>>,
+    services: Services,
 ) -> Result<(), TuiError> {
-    let mut app = App::new(config, forges, login);
+    let mut app = App::new(config, services);
     app.push(Box::new(Welcome::new(warnings)));
     app.run().await
 }
@@ -35,13 +33,19 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(config: &Config, forges: Forges, login: Option<Arc<dyn LoginFlow>>) -> Self {
+    pub fn new(config: &Config, services: Services) -> Self {
         let (tx, actions) = mpsc::unbounded_channel();
         let theme = Theme::from_config(&config.ui);
         let fps = f64::from(config.ui.max_fps.max(1));
         Self {
             views: Vec::new(),
-            ctx: Ctx::new(theme, config.ui.animations, forges, login, tx),
+            ctx: Ctx::new(
+                theme,
+                config.ui.animations,
+                services,
+                config.refresh.clone(),
+                tx,
+            ),
             actions,
             frame_interval: Duration::from_secs_f64(1.0 / fps),
             dirty: true,

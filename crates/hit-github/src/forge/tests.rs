@@ -492,3 +492,54 @@ async fn sso_partial_results_keep_data() {
     assert_eq!(items.len(), 1);
     let _ = AccessHint::SsoPartial { org_ids: vec![] };
 }
+
+#[tokio::test]
+async fn notifications_revalidate_with_etag() {
+    let server = MockServer::start().await;
+    // First mounted mock wins: the 304 only matches revalidations.
+    Mock::given(method("GET"))
+        .and(path("/api/notifications"))
+        .and(header("if-none-match", "\"v1\""))
+        .respond_with(ResponseTemplate::new(304).insert_header("x-poll-interval", "120"))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/notifications"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("etag", "\"v1\"")
+                .insert_header("x-poll-interval", "60")
+                .set_body_json(json!([notification_json(
+                    "11",
+                    "PullRequest",
+                    Some(7),
+                    "review_requested"
+                )])),
+        )
+        .mount(&server)
+        .await;
+
+    let forge = default_forge(&server);
+    assert_eq!(Notifications::poll_interval(&forge), None);
+    let query = NotificationQuery::default();
+    let first = Notifications::list(&forge, &query, &PageRequest::first(50))
+        .await
+        .unwrap();
+    assert_eq!(
+        Notifications::poll_interval(&forge),
+        Some(std::time::Duration::from_secs(60))
+    );
+    let second = Notifications::list(&forge, &query, &PageRequest::first(50))
+        .await
+        .unwrap();
+    assert_eq!(first.items, second.items, "304 reuses the stored body");
+    assert_eq!(
+        Notifications::poll_interval(&forge),
+        Some(std::time::Duration::from_secs(120))
+    );
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[0].headers.get("if-none-match").is_none());
+    assert_eq!(requests[1].headers.get("if-none-match").unwrap(), "\"v1\"");
+}

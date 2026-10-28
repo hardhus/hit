@@ -1,6 +1,12 @@
 //! The GitHub provider: core capabilities on top of [`Api`].
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 use async_trait::async_trait;
 use hit_core::{
@@ -20,7 +26,7 @@ use serde_json::json;
 
 use crate::{
     Api,
-    api::{Op, next_page},
+    api::Op,
     nodes::{
         self, FocusData, IssueData, PullData, SearchConnection, SearchData, SearchNode, queries,
     },
@@ -61,6 +67,8 @@ pub struct GithubForge {
     account: AccountId,
     api: Arc<Api>,
     focus: FocusOptions,
+    /// Last `X-Poll-Interval` from the notifications API, in seconds (0 = unknown).
+    poll_secs: Arc<AtomicU64>,
 }
 
 impl GithubForge {
@@ -69,6 +77,7 @@ impl GithubForge {
             account,
             api: Arc::new(api),
             focus,
+            poll_secs: Arc::default(),
         }
     }
 
@@ -127,6 +136,10 @@ impl Forge for GithubForge {
 
     fn repositories(&self) -> Option<&dyn Repositories> {
         Some(self)
+    }
+
+    fn local_key(&self) -> Option<hit_core::Zeroizing<[u8; 32]>> {
+        Some(self.api.local_key())
     }
 }
 
@@ -341,16 +354,25 @@ impl Notifications for GithubForge {
         if let Some(since) = query.since {
             path.push_str(&format!("&since={}", since.strftime("%Y-%m-%dT%H:%M:%SZ")));
         }
-        let response = self.api.get(&path).await?;
-        let next = next_page(response.headers()).map(|n| Cursor(n.to_string()));
-        let raw: Vec<NotificationJson> = response.json().await.map_err(|e| {
-            ForgeError::InvalidResponse(format!("notifications: {}", e.without_url()))
-        })?;
+        // Polled every minute: conditional, so unchanged pages cost nothing.
+        let fetched = self.api.get_conditional(&path).await?;
+        if let Some(interval) = fetched.poll_interval {
+            self.poll_secs.store(interval.as_secs(), Ordering::Relaxed);
+        }
+        let next = fetched.next_page.map(|n| Cursor(n.to_string()));
+        let raw: Vec<NotificationJson> = fetched.json("notifications")?;
         let items = raw
             .into_iter()
             .map(|n| n.into_model(self.api.host()))
             .collect();
         Ok(Page { items, next })
+    }
+
+    fn poll_interval(&self) -> Option<std::time::Duration> {
+        match self.poll_secs.load(Ordering::Relaxed) {
+            0 => None,
+            secs => Some(std::time::Duration::from_secs(secs)),
+        }
     }
 
     async fn mark_read(&self, id: &NotificationId) -> Result<()> {
@@ -517,12 +539,9 @@ impl Repositories for GithubForge {
             "user/repos?sort=pushed&per_page={}&page={number}",
             page.per_page.clamp(1, 100)
         );
-        let response = self.api.get(&path).await?;
-        let next = next_page(response.headers()).map(|n| Cursor(n.to_string()));
-        let raw: Vec<RepoJson> = response
-            .json()
-            .await
-            .map_err(|e| ForgeError::InvalidResponse(format!("repos: {}", e.without_url())))?;
+        let fetched = self.api.get_conditional(&path).await?;
+        let next = fetched.next_page.map(|n| Cursor(n.to_string()));
+        let raw: Vec<RepoJson> = fetched.json("repos")?;
         Ok(Page {
             items: raw.into_iter().map(|r| r.into_model(self.host())).collect(),
             next,

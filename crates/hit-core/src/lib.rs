@@ -20,3 +20,4 @@ pub use id::{AccountId, ForgeKind, Host, ItemKind, ItemRef, ParseRepoRefError, R
 
 pub use async_trait::async_trait;
 pub use jiff::Timestamp;
+pub use zeroize::Zeroizing;
