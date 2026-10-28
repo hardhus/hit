@@ -1,0 +1,29 @@
+query Pull($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      ...Pr
+      body
+      thread: comments(first: 50) {
+        nodes { id body createdAt updatedAt author { __typename login } }
+      }
+      reviews(last: 30) {
+        nodes { state body submittedAt author { __typename login } }
+      }
+      checks: commits(last: 1) {
+        nodes {
+          commit {
+            statusCheckRollup {
+              contexts(first: 50) {
+                nodes {
+                  __typename
+                  ... on CheckRun { name status conclusion detailsUrl }
+                  ... on StatusContext { context state targetUrl }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

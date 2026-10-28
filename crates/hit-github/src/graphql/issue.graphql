@@ -1,0 +1,11 @@
+query Issue($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    issue(number: $number) {
+      ...Iss
+      body
+      thread: comments(first: 50) {
+        nodes { id body createdAt updatedAt author { __typename login } }
+      }
+    }
+  }
+}

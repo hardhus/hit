@@ -6,6 +6,7 @@ mod paths;
 
 pub use load::{ConfigError, ConfigWarning, Loaded, Source, default_toml, init, load};
 pub use model::{
-    AuthConfig, Config, GeneralConfig, HostConfig, LogConfig, LogLevel, ThemeName, UiConfig,
+    AuthConfig, Config, FocusConfig, GeneralConfig, HostConfig, LogConfig, LogLevel, ThemeName,
+    UiConfig,
 };
 pub use paths::{APP_NAME, Paths, PathsError};

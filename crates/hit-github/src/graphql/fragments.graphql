@@ -1,0 +1,63 @@
+fragment Pr on PullRequest {
+  number
+  title
+  url
+  state
+  isDraft
+  createdAt
+  updatedAt
+  closedAt
+  mergedAt
+  author { __typename login }
+  repository { name owner { login } }
+  labels(first: 10) { nodes { name color description } }
+  assignees(first: 10) { nodes { login } }
+  reviewRequests(first: 10) {
+    nodes {
+      requestedReviewer {
+        __typename
+        ... on User { login }
+        ... on Bot { login }
+        ... on Mannequin { login }
+        ... on Team { combinedSlug }
+      }
+    }
+  }
+  reviewDecision
+  mergeable
+  additions
+  deletions
+  changedFiles
+  comments { totalCount }
+  headRefName
+  baseRefName
+  commits(last: 1) {
+    nodes {
+      commit {
+        statusCheckRollup {
+          state
+          contexts(first: 0) {
+            checkRunCountsByState { state count }
+            statusContextCountsByState { state count }
+          }
+        }
+      }
+    }
+  }
+}
+
+fragment Iss on Issue {
+  number
+  title
+  url
+  state
+  stateReason
+  createdAt
+  updatedAt
+  closedAt
+  author { __typename login }
+  repository { name owner { login } }
+  labels(first: 10) { nodes { name color description } }
+  assignees(first: 10) { nodes { login } }
+  comments { totalCount }
+}

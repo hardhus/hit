@@ -15,7 +15,7 @@ use hit_core::{
 };
 use reqwest::Client;
 
-use crate::{Api, ApiOptions, GithubForge, GithubHost, token_kind, verify};
+use crate::{Api, ApiOptions, FocusOptions, GithubForge, GithubHost, token_kind, verify};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoginStorage {
@@ -30,6 +30,8 @@ pub struct LoginSettings {
     pub read_only: bool,
     pub allow_mark_read: bool,
     pub storage: LoginStorage,
+    /// Action Required categories for the signed-in forge.
+    pub focus: FocusOptions,
 }
 
 /// Everything needed to sign in to one GitHub host.
@@ -185,7 +187,7 @@ impl GithubLogin {
         }
 
         tracing::info!(account = %account.key(), kind = ?account.token_kind, "signed in");
-        let forge = GithubForge::new(account.id(), api);
+        let forge = GithubForge::new(account.id(), api, self.settings.focus);
         Ok((account, forge))
     }
 }
@@ -266,6 +268,7 @@ mod tests {
             read_only: true,
             allow_mark_read: false,
             storage: LoginStorage::Keyring,
+            focus: FocusOptions::default(),
         }
     }
 

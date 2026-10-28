@@ -9,7 +9,8 @@ use hit_auth::{
 use hit_config::{Config, Paths};
 use hit_core::{ForgeKind, Forges, auth::LoginFlow};
 use hit_github::{
-    Api, ApiOptions, GithubForge, GithubHost, GithubLogin, LoginSettings, LoginStorage, oauth,
+    Api, ApiOptions, FocusOptions, GithubForge, GithubHost, GithubLogin, LoginSettings,
+    LoginStorage, oauth,
 };
 
 pub fn accounts_path(paths: &Paths) -> PathBuf {
@@ -25,6 +26,17 @@ pub fn store(storage: Storage, paths: &Paths) -> Arc<dyn TokenStore> {
 
 pub fn env(key: &str) -> Option<String> {
     std::env::var(key).ok()
+}
+
+pub fn focus_options(config: &Config) -> FocusOptions {
+    let focus = &config.focus;
+    FocusOptions {
+        review_requests: focus.review_requests,
+        my_pull_requests: focus.my_pull_requests,
+        mentions: focus.mentions,
+        mention_days: focus.mention_days,
+        assigned: focus.assigned,
+    }
 }
 
 pub fn api_options(account: &Account, config: &Config) -> ApiOptions {
@@ -89,6 +101,7 @@ pub fn tui_login(config: &Config, paths: &Paths) -> Option<Arc<dyn LoginFlow>> {
         read_only: config.auth.read_only,
         allow_mark_read: config.auth.allow_mark_read,
         storage: LoginStorage::Keyring,
+        focus: focus_options(config),
     };
     let login = github_login(host, config, paths, settings).ok()?;
     Some(Arc::new(login))
@@ -128,7 +141,11 @@ pub fn forges(config: &Config, paths: &Paths) -> (Forges, Vec<String>) {
             Ok(Some((secret, source))) => {
                 tracing::info!(account = %key, %source, "account loaded");
                 let api = Api::new(http.clone(), host, secret, api_options(account, config));
-                forges.add(Arc::new(GithubForge::new(account.id(), api)));
+                forges.add(Arc::new(GithubForge::new(
+                    account.id(),
+                    api,
+                    focus_options(config),
+                )));
             }
             Ok(None) => warnings.push(format!(
                 "{key}: no stored token; sign in again with `hit auth login`"
