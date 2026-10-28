@@ -1,0 +1,22 @@
+[package]
+name = "hit-config"
+description = "Configuration and platform paths for hit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+dirs.workspace = true
+serde.workspace = true
+serde_ignored.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

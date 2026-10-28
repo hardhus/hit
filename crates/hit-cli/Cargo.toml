@@ -3,6 +3,7 @@ name = "hit-cli"
 description = "A keyboard-driven terminal UI for GitHub and other forges"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
@@ -10,3 +11,20 @@ authors.workspace = true
 [[bin]]
 name = "hit"
 path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+clap_complete.workspace = true
+color-eyre.workspace = true
+hit-config.workspace = true
+hit-tui.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-appender.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
