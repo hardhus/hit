@@ -45,6 +45,8 @@ const COMING: [(&str, &str); 4] = [
 /// A taste of the user's day, fetched in the background.
 enum Summary {
     NoAccount,
+    /// Signed in, but the forge cannot report Action Required yet.
+    SignedIn(String),
     Loading {
         focus: Option<Arc<Vec<FocusItem>>>,
         unread: Option<usize>,
@@ -80,6 +82,7 @@ impl Welcome {
                 self.summary = Summary::Failed(e.clone());
                 return;
             }
+            DataEvent::Login(_) => return,
         }
         if let (Some(focus), Some(unread)) = (focus.as_ref(), *unread) {
             self.summary = Summary::Ready {
@@ -110,9 +113,26 @@ impl Welcome {
         let t = &ctx.theme;
         let bold = |color: Color| Style::new().fg(color).add_modifier(Modifier::BOLD);
         match &self.summary {
-            Summary::NoAccount => Line::from(vec![
-                Span::styled("not signed in yet, try ", Style::new().fg(t.muted)),
+            Summary::NoAccount if ctx.login.is_some() => Line::from(vec![
+                Span::styled("not signed in yet: press ", Style::new().fg(t.muted)),
+                Span::styled("l", bold(t.accent)),
+                Span::styled(" to sign in, or try ", Style::new().fg(t.muted)),
                 Span::styled("hit --demo", bold(t.accent_alt)),
+            ]),
+            Summary::NoAccount => Line::from(vec![
+                Span::styled("not signed in yet: run ", Style::new().fg(t.muted)),
+                Span::styled("hit auth login", bold(t.accent)),
+                Span::styled(", or try ", Style::new().fg(t.muted)),
+                Span::styled("hit --demo", bold(t.accent_alt)),
+            ]),
+            Summary::SignedIn(account) => Line::from(vec![
+                Span::styled("✓ ", bold(t.success)),
+                Span::styled("signed in as ", Style::new().fg(t.fg)),
+                Span::styled(account.clone(), bold(t.accent_alt)),
+                Span::styled(
+                    " · your data arrives in the next update",
+                    Style::new().fg(t.muted),
+                ),
             ]),
             Summary::Loading { .. } => {
                 let frame = if ctx.animations {
@@ -231,7 +251,11 @@ impl Welcome {
         );
     }
 
-    fn hints(ctx: &Ctx) -> Line<'static> {
+    fn can_sign_in(&self, ctx: &Ctx) -> bool {
+        matches!(self.summary, Summary::NoAccount) && ctx.login.is_some()
+    }
+
+    fn hints(&self, ctx: &Ctx) -> Line<'static> {
         let t = &ctx.theme;
         let key = |k: &'static str| {
             Span::styled(
@@ -243,7 +267,12 @@ impl Welcome {
             )
         };
         let label = |l: &'static str| Span::styled(format!(" {l}   "), Style::new().fg(t.muted));
-        Line::from(vec![key("q"), label("quit"), key("ctrl+c"), label("quit")])
+        let mut spans = Vec::new();
+        if self.can_sign_in(ctx) {
+            spans.extend([key("l"), label("sign in")]);
+        }
+        spans.extend([key("q"), label("quit"), key("ctrl+c"), label("quit")]);
+        Line::from(spans)
     }
 }
 
@@ -286,20 +315,32 @@ async fn count_unread(notifications: &dyn hit_core::Notifications) -> Result<usi
 
 impl View for Welcome {
     fn mount(&mut self, ctx: &Ctx) {
-        // Multiple accounts are summarized once there is a real accounts model (F2).
-        if let Some(forge) = ctx.forges.iter().next() {
-            self.summary = Summary::Loading {
-                focus: None,
-                unread: None,
-            };
-            spawn_summary(Arc::clone(forge), ctx);
-        }
+        // Summarizing several accounts together comes with the Action
+        // Required screen (F5); for now the first account is shown.
+        self.summary = match ctx.forges.iter().next() {
+            None => Summary::NoAccount,
+            Some(forge) if forge.focus().is_none() => {
+                Summary::SignedIn(format!("@{}", forge.account().login))
+            }
+            Some(forge) => {
+                spawn_summary(Arc::clone(forge), ctx);
+                Summary::Loading {
+                    focus: None,
+                    unread: None,
+                }
+            }
+        };
     }
 
-    fn handle_event(&mut self, event: &Event, _ctx: &Ctx) -> Option<Action> {
+    fn handle_event(&mut self, event: &Event, ctx: &Ctx) -> Option<Action> {
         #[cfg(debug_assertions)]
         debug_panic(event);
-        let _ = event;
+        if let Event::Key(key) = event
+            && key.code == crossterm::event::KeyCode::Char('l')
+            && self.can_sign_in(ctx)
+        {
+            return Some(Action::OpenLogin);
+        }
         None
     }
 
@@ -389,7 +430,7 @@ impl View for Welcome {
         }
 
         frame.render_widget(
-            Paragraph::new(Self::hints(ctx)).alignment(Alignment::Center),
+            Paragraph::new(self.hints(ctx)).alignment(Alignment::Center),
             hints,
         );
     }
@@ -430,7 +471,10 @@ mod tests {
 
     fn ctx(forges: Forges) -> (Ctx, mpsc::UnboundedReceiver<Action>) {
         let (tx, rx) = mpsc::unbounded_channel();
-        (Ctx::new(Theme::jinx(true, true), false, forges, tx), rx)
+        (
+            Ctx::new(Theme::jinx(true, true), false, forges, None, tx),
+            rx,
+        )
     }
 
     fn demo_forges() -> Forges {

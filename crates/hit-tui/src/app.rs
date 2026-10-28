@@ -1,8 +1,8 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use hit_config::Config;
-use hit_core::Forges;
+use hit_core::{Forges, auth::LoginFlow};
 use ratatui::{Frame, widgets::Block};
 use tokio::{sync::mpsc, time::MissedTickBehavior};
 
@@ -10,12 +10,17 @@ use crate::{
     Action, Ctx, Event, Theme, TuiError, View,
     event::EventSource,
     terminal::{self, Term, TerminalGuard},
-    views::Welcome,
+    views::{LoginView, Welcome},
 };
 
 /// Runs the TUI until the user quits or a shutdown signal arrives.
-pub async fn run(config: &Config, warnings: Vec<String>, forges: Forges) -> Result<(), TuiError> {
-    let mut app = App::new(config, forges);
+pub async fn run(
+    config: &Config,
+    warnings: Vec<String>,
+    forges: Forges,
+    login: Option<Arc<dyn LoginFlow>>,
+) -> Result<(), TuiError> {
+    let mut app = App::new(config, forges, login);
     app.push(Box::new(Welcome::new(warnings)));
     app.run().await
 }
@@ -30,13 +35,13 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(config: &Config, forges: Forges) -> Self {
+    pub fn new(config: &Config, forges: Forges, login: Option<Arc<dyn LoginFlow>>) -> Self {
         let (tx, actions) = mpsc::unbounded_channel();
         let theme = Theme::from_config(&config.ui);
         let fps = f64::from(config.ui.max_fps.max(1));
         Self {
             views: Vec::new(),
-            ctx: Ctx::new(theme, config.ui.animations, forges, tx),
+            ctx: Ctx::new(theme, config.ui.animations, forges, login, tx),
             actions,
             frame_interval: Duration::from_secs_f64(1.0 / fps),
             dirty: true,
@@ -150,6 +155,23 @@ impl App {
                 }
             }
             Action::Redraw | Action::Data(_) => {}
+            Action::OpenLogin => {
+                if let Some(flow) = self.ctx.login.clone() {
+                    self.push(Box::new(LoginView::new(flow)));
+                }
+                return;
+            }
+            Action::AccountAdded(ref handle) => {
+                tracing::info!(account = %handle.0.account(), "account added");
+                self.ctx.forges.add(Arc::clone(&handle.0));
+                // Close the sign-in screen and refresh what is below it.
+                self.views.pop();
+                if let Some(view) = self.views.last_mut() {
+                    view.mount(&self.ctx);
+                }
+                self.dirty = true;
+                return;
+            }
         }
         if let Some(view) = self.views.last_mut()
             && let Some(next) = view.update(&action, &self.ctx)

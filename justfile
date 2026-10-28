@@ -36,3 +36,7 @@ msrv:
 # set workspace version (e.g. just bump 0.0.2)
 bump version:
     sh scripts/bump.sh {{version}}
+
+# check dependencies for known vulnerabilities (needs cargo-audit)
+audit:
+    sh scripts/audit.sh

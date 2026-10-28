@@ -1,6 +1,8 @@
+mod accounts;
 mod cli;
 mod commands;
 mod logging;
+mod style;
 
 use std::process::ExitCode;
 
@@ -39,6 +41,21 @@ fn main() -> Result<ExitCode> {
             };
             commands::tui::run(&paths, &options)?;
             Ok(ExitCode::SUCCESS)
+        }
+        Some(Command::Auth { command }) => {
+            paths
+                .ensure()
+                .wrap_err("could not create hit's directories")?;
+            let loaded = hit_config::load(&config_file);
+            let _log_guard = logging::init(
+                &paths.logs,
+                &loaded.config.log,
+                cli.log_level.map(Into::into),
+            )?;
+            for warning in &loaded.warnings {
+                eprintln!("{} config: {warning}", style::warn("warning:"));
+            }
+            commands::auth::run(command, &loaded.config, &paths)
         }
         Some(Command::Config { command }) => commands::config::run(command, &config_file),
         Some(Command::Paths) => {

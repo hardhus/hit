@@ -166,6 +166,8 @@ pub(crate) fn parse(text: &str) -> (Config, Vec<ConfigWarning>) {
         general: section(&mut root, "general", &mut warnings),
         ui: section(&mut root, "ui", &mut warnings),
         log: section(&mut root, "log", &mut warnings),
+        auth: section(&mut root, "auth", &mut warnings),
+        hosts: section(&mut root, "hosts", &mut warnings),
     };
 
     for unknown in root.keys() {
@@ -396,6 +398,29 @@ mod tests {
                 section: "ui".into()
             }]
         );
+    }
+
+    #[test]
+    fn auth_and_hosts_sections() {
+        let text = r#"
+            [auth]
+            read_only = true
+
+            [hosts."ghe.example.com"]
+            oauth_client_id = "Ov23abc"
+
+            [hosts."broken.example.com"]
+            oauth_client_id = 42
+        "#;
+        let (config, warnings) = parse(text);
+        assert!(config.auth.read_only);
+        assert!(!config.auth.allow_mark_read);
+        assert_eq!(
+            config.hosts["ghe.example.com"].oauth_client_id.as_deref(),
+            Some("Ov23abc")
+        );
+        assert!(!config.hosts.contains_key("broken.example.com"));
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
     }
 
     #[test]

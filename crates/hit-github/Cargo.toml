@@ -1,0 +1,35 @@
+[package]
+name = "hit-github"
+description = "GitHub provider for hit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+# Lets tests talk to plain-http mock servers. Never enable in release builds.
+test-http = ["hit-auth/test-http"]
+
+[dependencies]
+async-trait.workspace = true
+hit-auth.workspace = true
+hit-core.workspace = true
+jiff.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+hit-github = { path = ".", features = ["test-http"] }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt", "macros"] }
+wiremock.workspace = true
+
+[lints]
+workspace = true

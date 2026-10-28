@@ -1,6 +1,6 @@
-use std::time::Instant;
+use std::{sync::Arc, time::Instant};
 
-use hit_core::Forges;
+use hit_core::{Forges, auth::LoginFlow};
 use ratatui::{Frame, layout::Rect};
 use tokio::sync::mpsc;
 
@@ -12,6 +12,8 @@ pub struct Ctx {
     pub animations: bool,
     /// Connected forge accounts (the demo forge with `--demo`).
     pub forges: Forges,
+    /// Sign-in from inside the TUI, when available.
+    pub login: Option<Arc<dyn LoginFlow>>,
     started: Instant,
     tx: mpsc::UnboundedSender<Action>,
 }
@@ -21,12 +23,14 @@ impl Ctx {
         theme: Theme,
         animations: bool,
         forges: Forges,
+        login: Option<Arc<dyn LoginFlow>>,
         tx: mpsc::UnboundedSender<Action>,
     ) -> Self {
         Self {
             theme,
             animations,
             forges,
+            login,
             started: Instant::now(),
             tx,
         }

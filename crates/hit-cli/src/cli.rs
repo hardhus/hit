@@ -62,6 +62,11 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Sign in, sign out and check accounts.
+    Auth {
+        #[command(subcommand)]
+        command: AuthCommand,
+    },
     /// Inspect and manage config.toml.
     Config {
         #[command(subcommand)]
@@ -74,6 +79,54 @@ pub enum Command {
         #[arg(value_enum)]
         shell: clap_complete::Shell,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AuthCommand {
+    /// Sign in to GitHub (device flow in the browser by default).
+    #[command(after_help = "\
+Examples:
+  hit auth login                          sign in to github.com in the browser
+  hit auth login --read-only              hit will never change anything with this account
+  hit auth login --with-token < token.txt use a personal access token (read from stdin)
+  hit auth login --from-gh                reuse the GitHub CLI's token
+  hit auth login --hostname ghe.example.com --with-token")]
+    Login(LoginArgs),
+    /// Remove an account and its stored token.
+    Logout {
+        /// Host of the account.
+        #[arg(long, value_name = "HOST")]
+        hostname: Option<String>,
+        /// Login of the account, when several are signed in on the host.
+        #[arg(long, value_name = "LOGIN")]
+        user: Option<String>,
+    },
+    /// Show accounts, token sources, scopes and access problems.
+    Status,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct LoginArgs {
+    /// GitHub host, e.g. ghe.example.com.
+    #[arg(long, value_name = "HOST", default_value = "github.com")]
+    pub hostname: String,
+    /// Read a personal access token from stdin instead of using the browser.
+    /// Never pass tokens as arguments: they end up in shell history.
+    #[arg(long, conflicts_with = "from_gh")]
+    pub with_token: bool,
+    /// Import the token the GitHub CLI (`gh`) has for this host.
+    #[arg(long)]
+    pub from_gh: bool,
+    /// hit never writes with this account (no comments, reviews or merges).
+    #[arg(long)]
+    pub read_only: bool,
+    /// Ask only for public repository access.
+    #[arg(long)]
+    pub minimal_scopes: bool,
+    /// Store the token in a private file when no system keyring is available.
+    /// Anyone with access to your user account can read it.
+    #[arg(long)]
+    pub insecure_storage: bool,
 }
 
 #[derive(Debug, Subcommand)]

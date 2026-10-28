@@ -1,7 +1,7 @@
 //! Configuration model. Every field has a default so a partial (or empty)
 //! `config.toml` is always valid.
 
-use std::fmt;
+use std::{collections::BTreeMap, fmt};
 
 use serde::{Deserialize, Serialize};
 
@@ -11,6 +11,27 @@ pub struct Config {
     pub general: GeneralConfig,
     pub ui: UiConfig,
     pub log: LogConfig,
+    pub auth: AuthConfig,
+    /// Per-host settings, keyed by host name (e.g. `ghe.example.com`).
+    pub hosts: BTreeMap<String, HostConfig>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AuthConfig {
+    /// Never write with any account, regardless of the token's permissions.
+    pub read_only: bool,
+    /// In read-only mode, still allow marking notifications read. Off by
+    /// default: read-only means hit changes nothing.
+    pub allow_mark_read: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HostConfig {
+    /// Client id of an OAuth app registered on this host (GitHub Enterprise),
+    /// enabling device-flow sign-in there.
+    pub oauth_client_id: Option<String>,
 }
 
 /// Reserved for app-wide behaviour (startup view, default account, …).
