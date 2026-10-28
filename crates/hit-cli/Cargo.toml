@@ -1,0 +1,12 @@
+[package]
+name = "hit-cli"
+description = "A keyboard-driven terminal UI for GitHub and other forges"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "hit"
+path = "src/main.rs"
