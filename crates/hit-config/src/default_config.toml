@@ -44,6 +44,22 @@ mention_days = 14
 # Open issues and pull requests assigned to you.
 assigned = true
 
+[refresh]
+# Minutes between Action Required refreshes while hit is open (0-1440);
+# 0 refreshes only on start and when you press `r`.
+focus_minutes = 5
+# Poll notifications as often as GitHub asks (usually every 60 s). Unchanged
+# results do not count against the rate limit.
+notifications = true
+
+[cache]
+# Keep the last known data locally so hit opens instantly and works offline.
+# Encrypted with a key derived from each account's token: unreadable without
+# it, and gone for good when you sign out. `hit cache clear` deletes it all.
+enabled = true
+# Drop cached data older than this many days (1-365).
+max_age_days = 30
+
 # Per-host settings for GitHub Enterprise Server. To sign in with the device
 # flow there, register an OAuth app on that server and set its client id:
 #

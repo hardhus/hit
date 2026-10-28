@@ -139,6 +139,12 @@ impl Forge for MockForge {
     fn repositories(&self) -> Option<&dyn Repositories> {
         Some(self)
     }
+
+    /// The demo has nothing secret; a fixed key lets tests exercise the
+    /// encrypted cache. (`hit --demo` itself runs without a cache.)
+    fn local_key(&self) -> Option<hit_core::Zeroizing<[u8; 32]>> {
+        Some(hit_core::Zeroizing::new([0x5e; 32]))
+    }
 }
 
 #[async_trait]

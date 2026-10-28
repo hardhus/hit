@@ -7,6 +7,7 @@ use color_eyre::{
 use hit_config::{LogLevel, Paths};
 use hit_core::Forges;
 use hit_forge_mock::{MockForge, MockOptions};
+use hit_tui::Services;
 
 use crate::{accounts, logging};
 
@@ -29,19 +30,27 @@ pub fn run(paths: &Paths, options: &Options<'_>) -> Result<()> {
     let mut warnings: Vec<String> = loaded.warnings.iter().map(ToString::to_string).collect();
 
     // Accounts are read before the runtime starts: keyring access blocks.
-    let (forges, login) = if options.demo {
+    let services = if options.demo {
+        // The demo never touches the cache: nothing real to keep.
         let mut forges = Forges::new();
         forges.add(Arc::new(MockForge::demo(MockOptions::default())));
-        (forges, None)
+        Services {
+            forges,
+            ..Services::default()
+        }
     } else {
         let (forges, account_warnings) = accounts::forges(&loaded.config, paths);
         for warning in &account_warnings {
             tracing::warn!(%warning, "accounts");
         }
         warnings.extend(account_warnings);
-        (forges, accounts::tui_login(&loaded.config, paths))
+        Services {
+            forges,
+            login: accounts::tui_login(&loaded.config, paths),
+            cache: accounts::open_cache(&loaded.config, paths),
+        }
     };
-    tracing::info!(?forges, demo = options.demo, "forges");
+    tracing::info!(forges = ?services.forges, cache = services.cache.is_some(), demo = options.demo, "services");
 
     hit_tui::install_panic_hook();
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -50,7 +59,7 @@ pub fn run(paths: &Paths, options: &Options<'_>) -> Result<()> {
         .build()
         .wrap_err("could not start the async runtime")?;
 
-    let result = runtime.block_on(hit_tui::run(&loaded.config, warnings, forges, login));
+    let result = runtime.block_on(hit_tui::run(&loaded.config, warnings, services));
     tracing::info!(ok = result.is_ok(), "hit exiting");
 
     result

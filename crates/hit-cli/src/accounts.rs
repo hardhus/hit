@@ -6,12 +6,15 @@ use hit_auth::{
     Account, Accounts, FileStore, KeyringStore, Secret, Storage, StoreError, TokenSource,
     TokenStore, env_token,
 };
+use hit_cache::{Cache, Vault};
 use hit_config::{Config, Paths};
+use hit_core::Timestamp;
 use hit_core::{ForgeKind, Forges, auth::LoginFlow};
 use hit_github::{
     Api, ApiOptions, FocusOptions, GithubForge, GithubHost, GithubLogin, LoginSettings,
-    LoginStorage, oauth,
+    LoginStorage, local_key, oauth,
 };
+use jiff::SignedDuration;
 
 pub fn accounts_path(paths: &Paths) -> PathBuf {
     paths.config.join("accounts.toml")
@@ -167,4 +170,47 @@ pub fn forges(config: &Config, paths: &Paths) -> (Forges, Vec<String>) {
         );
     }
     (forges, warnings)
+}
+
+pub fn cache_path(paths: &Paths) -> PathBuf {
+    paths.cache.join("cache.sqlite")
+}
+
+/// Opens the encrypted local cache and drops entries older than the
+/// configured age. Any problem means "no cache", never a failed start.
+pub fn open_cache(config: &Config, paths: &Paths) -> Option<Arc<Cache>> {
+    if !config.cache.enabled {
+        return None;
+    }
+    match Cache::open(&cache_path(paths)) {
+        Ok(cache) => {
+            let days = i64::from(config.cache.max_age_days);
+            if let Ok(cutoff) = Timestamp::now().checked_sub(SignedDuration::from_hours(days * 24))
+                && let Err(e) = cache.prune(cutoff)
+            {
+                tracing::warn!(error = %e, "could not prune the cache");
+            }
+            Some(Arc::new(cache))
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "cache disabled for this run");
+            None
+        }
+    }
+}
+
+/// Removes what is cached for `account`, using its token to find it.
+pub fn clear_account_cache(account: &Account, token: &Secret, paths: &Paths) {
+    let path = cache_path(paths);
+    if !path.exists() {
+        return;
+    }
+    let Ok(host) = GithubHost::parse(account.host.as_str()) else {
+        return;
+    };
+    let vault = Vault::new(&local_key(token, &host), &account.id().to_string());
+    match Cache::open(&path).and_then(|cache| cache.clear_account(&vault)) {
+        Ok(removed) => tracing::info!(removed, account = %account.key(), "cleared account cache"),
+        Err(e) => tracing::warn!(error = %e, "could not clear the account cache"),
+    }
 }

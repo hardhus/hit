@@ -13,8 +13,56 @@ pub struct Config {
     pub log: LogConfig,
     pub auth: AuthConfig,
     pub focus: FocusConfig,
+    pub refresh: RefreshConfig,
+    pub cache: CacheConfig,
     /// Per-host settings, keyed by host name (e.g. `ghe.example.com`).
     pub hosts: BTreeMap<String, HostConfig>,
+}
+
+/// How often data is refreshed while hit is open.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RefreshConfig {
+    /// Minutes between Action Required refreshes; 0 = only on start and `r`.
+    pub focus_minutes: u32,
+    /// Poll notifications at the interval the forge asks for (usually 60 s).
+    /// Unchanged results cost no rate limit.
+    pub notifications: bool,
+}
+
+impl RefreshConfig {
+    pub const FOCUS_MINUTES_RANGE: (u32, u32) = (0, 1440);
+}
+
+impl Default for RefreshConfig {
+    fn default() -> Self {
+        Self {
+            focus_minutes: 5,
+            notifications: true,
+        }
+    }
+}
+
+/// The local cache that lets hit draw instantly.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CacheConfig {
+    pub enabled: bool,
+    /// Cached data older than this is dropped on start.
+    pub max_age_days: u32,
+}
+
+impl CacheConfig {
+    pub const MAX_AGE_RANGE: (u32, u32) = (1, 365);
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_age_days: 30,
+        }
+    }
 }
 
 /// What appears in Action Required.

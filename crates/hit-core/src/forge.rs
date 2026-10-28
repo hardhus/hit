@@ -8,6 +8,7 @@
 //! reviews, merging) are added later without touching these.
 
 use async_trait::async_trait;
+use zeroize::Zeroizing;
 
 use crate::{
     AccountId, ForgeKind, ItemRef, RepoRef, Result,
@@ -44,6 +45,12 @@ pub trait Forge: Send + Sync {
     fn repositories(&self) -> Option<&dyn Repositories> {
         None
     }
+
+    /// A key only this account's credentials can produce, for encrypting
+    /// what hit stores locally about it. `None` disables local caching.
+    fn local_key(&self) -> Option<Zeroizing<[u8; 32]>> {
+        None
+    }
 }
 
 #[async_trait]
@@ -68,6 +75,11 @@ pub trait Notifications: Send + Sync {
     ) -> Result<Page<Notification>>;
     async fn mark_read(&self, id: &NotificationId) -> Result<()>;
     async fn mark_all_read(&self, scope: &Scope) -> Result<()>;
+
+    /// How often the forge wants notifications to be polled, if it says.
+    fn poll_interval(&self) -> Option<std::time::Duration> {
+        None
+    }
 }
 
 /// "Action Required". A capability of its own because forges answer it

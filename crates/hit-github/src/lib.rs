@@ -11,7 +11,7 @@ mod orgs;
 mod rest;
 mod verify;
 
-pub use api::{Api, ApiOptions, guard_graphql};
+pub use api::{Api, ApiOptions, Fetched, guard_graphql, local_key};
 pub use forge::{FocusOptions, GithubForge};
 pub use host::{GithubHost, HostError};
 pub use login::{GithubLogin, LoginSettings, LoginStorage};

@@ -67,6 +67,11 @@ pub enum Command {
         #[command(subcommand)]
         command: AuthCommand,
     },
+    /// Manage the encrypted local cache.
+    Cache {
+        #[command(subcommand)]
+        command: CacheCommand,
+    },
     /// Inspect and manage config.toml.
     Config {
         #[command(subcommand)]
@@ -127,6 +132,14 @@ pub struct LoginArgs {
     /// Anyone with access to your user account can read it.
     #[arg(long)]
     pub insecure_storage: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CacheCommand {
+    /// Delete all cached data.
+    Clear,
+    /// Print the cache file path.
+    Path,
 }
 
 #[derive(Debug, Subcommand)]

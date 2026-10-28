@@ -13,7 +13,7 @@ use std::{
 use serde::de::DeserializeOwned;
 use toml::{Table, Value};
 
-use crate::model::{Config, FocusConfig, LogConfig, UiConfig};
+use crate::model::{CacheConfig, Config, FocusConfig, LogConfig, RefreshConfig, UiConfig};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -168,6 +168,8 @@ pub(crate) fn parse(text: &str) -> (Config, Vec<ConfigWarning>) {
         log: section(&mut root, "log", &mut warnings),
         auth: section(&mut root, "auth", &mut warnings),
         focus: section(&mut root, "focus", &mut warnings),
+        refresh: section(&mut root, "refresh", &mut warnings),
+        cache: section(&mut root, "cache", &mut warnings),
         hosts: section(&mut root, "hosts", &mut warnings),
     };
 
@@ -250,6 +252,26 @@ fn validate(config: &mut Config, warnings: &mut Vec<ConfigWarning>) {
         hi,
         "log",
         "retention_days",
+        warnings,
+    );
+
+    let (lo, hi) = RefreshConfig::FOCUS_MINUTES_RANGE;
+    clamp(
+        &mut config.refresh.focus_minutes,
+        lo,
+        hi,
+        "refresh",
+        "focus_minutes",
+        warnings,
+    );
+
+    let (lo, hi) = CacheConfig::MAX_AGE_RANGE;
+    clamp(
+        &mut config.cache.max_age_days,
+        lo,
+        hi,
+        "cache",
+        "max_age_days",
         warnings,
     );
 

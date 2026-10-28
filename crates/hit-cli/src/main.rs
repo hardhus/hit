@@ -57,6 +57,7 @@ fn main() -> Result<ExitCode> {
             }
             commands::auth::run(command, &loaded.config, &paths)
         }
+        Some(Command::Cache { command }) => Ok(commands::cache::run(command, &paths)),
         Some(Command::Config { command }) => commands::config::run(command, &config_file),
         Some(Command::Paths) => {
             commands::paths::run(&paths, &config_file);

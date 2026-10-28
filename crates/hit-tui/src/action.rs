@@ -2,6 +2,8 @@ use std::{fmt, sync::Arc};
 
 use hit_core::{Forge, ForgeError, auth::DeviceCode, focus::FocusItem};
 
+use crate::sync::Loaded;
+
 /// Something the app should do. Views return actions from input handling, and
 /// background tasks send them through [`crate::Ctx::sender`].
 #[derive(Debug, Clone)]
@@ -23,8 +25,10 @@ pub enum Action {
 /// cheap to clone.
 #[derive(Debug, Clone)]
 pub enum DataEvent {
-    Focus(Result<Arc<Vec<FocusItem>>, ForgeError>),
-    UnreadCount(Result<usize, ForgeError>),
+    /// A refresh round started.
+    Refreshing,
+    Focus(Result<Loaded<Arc<Vec<FocusItem>>>, ForgeError>),
+    UnreadCount(Result<Loaded<usize>, ForgeError>),
     Login(LoginEvent),
 }
 
