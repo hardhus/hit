@@ -1,6 +1,6 @@
-use std::sync::Arc;
+use std::{fmt, sync::Arc};
 
-use hit_core::{ForgeError, focus::FocusItem};
+use hit_core::{Forge, ForgeError, auth::DeviceCode, focus::FocusItem};
 
 /// Something the app should do. Views return actions from input handling, and
 /// background tasks send them through [`crate::Ctx::sender`].
@@ -13,6 +13,10 @@ pub enum Action {
     Redraw,
     /// A background fetch finished.
     Data(DataEvent),
+    /// Open the sign-in screen.
+    OpenLogin,
+    /// A sign-in finished; the account is ready to use.
+    AccountAdded(ForgeHandle),
 }
 
 /// Results of background fetches. Payloads are behind `Arc` so actions stay
@@ -21,4 +25,24 @@ pub enum Action {
 pub enum DataEvent {
     Focus(Result<Arc<Vec<FocusItem>>, ForgeError>),
     UnreadCount(Result<usize, ForgeError>),
+    Login(LoginEvent),
+}
+
+#[derive(Debug, Clone)]
+pub enum LoginEvent {
+    Code {
+        code: DeviceCode,
+        copied: bool,
+        opened: bool,
+    },
+    Failed(String),
+}
+
+#[derive(Clone)]
+pub struct ForgeHandle(pub Arc<dyn Forge>);
+
+impl fmt::Debug for ForgeHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ForgeHandle({})", self.0.account())
+    }
 }

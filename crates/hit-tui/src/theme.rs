@@ -144,6 +144,23 @@ impl Theme {
             .collect();
         Line::from(spans)
     }
+
+    /// [`Self::gradient_line`] for owned text.
+    pub fn gradient_line_owned(&self, text: String, width: usize, phase: f32) -> Line<'static> {
+        let width = width.max(1) as f32;
+        let spans: Vec<Span<'static>> = text
+            .chars()
+            .enumerate()
+            .map(|(column, ch)| {
+                let color = self.gradient_at(column as f32 / width + phase);
+                Span::styled(
+                    ch.to_string(),
+                    Style::new().fg(color).add_modifier(Modifier::BOLD),
+                )
+            })
+            .collect();
+        Line::from(spans)
+    }
 }
 
 fn rgb((r, g, b): Rgb) -> Color {

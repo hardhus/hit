@@ -22,3 +22,17 @@ level = "info"
 retention_days = 14
 # Oldest log files are deleted on startup until the total is below this (1-10240).
 max_total_mb = 50
+
+[auth]
+# Never write with any account (comments, reviews, merges…), whatever the
+# token allows. Can also be set per account: `hit auth login --read-only`.
+read_only = false
+# In read-only mode, still allow marking notifications read (only your own
+# inbox state changes). Off by default: read-only means hit changes nothing.
+allow_mark_read = false
+
+# Per-host settings for GitHub Enterprise Server. To sign in with the device
+# flow there, register an OAuth app on that server and set its client id:
+#
+# [hosts."ghe.example.com"]
+# oauth_client_id = "Ov23..."

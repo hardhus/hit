@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.0.2"
+version = "0.0.3"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT OR Apache-2.0"
@@ -12,9 +12,11 @@ authors = ["hardhus"]
 
 [workspace.dependencies]
 # internal
+hit-auth = { path = "crates/hit-auth" }
 hit-config = { path = "crates/hit-config" }
 hit-core = { path = "crates/hit-core" }
 hit-forge-mock = { path = "crates/hit-forge-mock" }
+hit-github = { path = "crates/hit-github" }
 hit-tui = { path = "crates/hit-tui" }
 
 # async
@@ -47,9 +49,22 @@ tracing-appender = "0.2"
 clap = { version = "4", features = ["derive", "env", "wrap_help"] }
 clap_complete = "4"
 
-# dev
+# auth & http
+# rustls with the platform certificate verifier (corporate CAs for GHE).
+reqwest = { version = "0.13", features = ["json", "form"] }
+# Linux uses the blocking Secret Service client: hit calls the keyring from
+# async code, and the tokio-based async client would nest runtimes.
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust", "vendored"] }
+secrecy = "0.10"
+url = "2"
+rpassword = "7"
+arboard = { version = "3", default-features = false }
+open = "5"
 serde_json = "1"
+
+# dev
 tempfile = "3"
+wiremock = "0.6"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

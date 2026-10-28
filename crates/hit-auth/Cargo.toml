@@ -1,0 +1,36 @@
+[package]
+name = "hit-auth"
+description = "Accounts, token storage and device-flow sign-in for hit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+# Lets tests talk to plain-http mock servers. Never enable in release builds.
+test-http = []
+
+[dependencies]
+hit-core.workspace = true
+jiff.workspace = true
+keyring.workspace = true
+reqwest.workspace = true
+secrecy.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+toml.workspace = true
+tracing.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt", "macros"] }
+wiremock.workspace = true
+serde_json.workspace = true
+hit-auth = { path = ".", features = ["test-http"] }
+
+[lints]
+workspace = true

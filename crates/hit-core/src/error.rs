@@ -25,6 +25,9 @@ pub enum ForgeError {
     Unsupported(&'static str),
     #[error("unexpected response from the forge: {0}")]
     InvalidResponse(String),
+    /// Blocked locally: the account is in read-only mode.
+    #[error("{0} is blocked: this account is read-only in hit")]
+    ReadOnly(String),
 }
 
 impl ForgeError {
@@ -42,6 +45,12 @@ pub enum AccessHint {
     OrgRestricted { org: String, url: String },
     /// The token lacks a scope or permission.
     TokenScope { needed: String },
+    /// The organization enforces SAML SSO and the token is not authorized
+    /// for it yet; the user can authorize it at `url` (short-lived).
+    SsoRequired { url: String },
+    /// Results from these organizations (ids) were left out because the token
+    /// is not SSO-authorized for them.
+    SsoPartial { org_ids: Vec<String> },
 }
 
 #[cfg(test)]

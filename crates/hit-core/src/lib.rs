@@ -3,6 +3,7 @@
 //!
 //! Nothing here knows about networking, the TUI or any specific forge.
 
+pub mod auth;
 pub mod diff;
 mod error;
 pub mod focus;
