@@ -1,5 +1,6 @@
 use std::time::Instant;
 
+use hit_core::Forges;
 use ratatui::{Frame, layout::Rect};
 use tokio::sync::mpsc;
 
@@ -9,15 +10,23 @@ use crate::{Action, Event, Theme};
 pub struct Ctx {
     pub theme: Theme,
     pub animations: bool,
+    /// Connected forge accounts (the demo forge with `--demo`).
+    pub forges: Forges,
     started: Instant,
     tx: mpsc::UnboundedSender<Action>,
 }
 
 impl Ctx {
-    pub fn new(theme: Theme, animations: bool, tx: mpsc::UnboundedSender<Action>) -> Self {
+    pub fn new(
+        theme: Theme,
+        animations: bool,
+        forges: Forges,
+        tx: mpsc::UnboundedSender<Action>,
+    ) -> Self {
         Self {
             theme,
             animations,
+            forges,
             started: Instant::now(),
             tx,
         }
@@ -36,6 +45,11 @@ impl Ctx {
 
 /// A screen on the view stack. Kept deliberately small; extend as the UX grows.
 pub trait View {
+    /// Called once when the view is pushed; a good place to start fetches.
+    fn mount(&mut self, ctx: &Ctx) {
+        let _ = ctx;
+    }
+
     /// Handles input. Unhandled input returns `None` and falls through to the
     /// app's global keys.
     fn handle_event(&mut self, event: &Event, ctx: &Ctx) -> Option<Action> {

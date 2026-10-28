@@ -13,7 +13,7 @@ pub mod theme;
 mod view;
 pub mod views;
 
-pub use action::Action;
+pub use action::{Action, DataEvent};
 pub use app::{App, run};
 pub use error::TuiError;
 pub use event::Event;
