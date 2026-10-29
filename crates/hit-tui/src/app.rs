@@ -7,19 +7,32 @@ use tokio::{sync::mpsc, time::MissedTickBehavior};
 
 use crate::{
     Action, Ctx, Event, Services, Theme, TuiError, View,
+    action::{Detail, Toast},
     event::EventSource,
+    keymap::Keymap,
+    shell::Shell,
     terminal::{self, Term, TerminalGuard},
-    views::{LoginView, Welcome},
+    views::{DetailView, LoginView, Welcome},
 };
 
 /// Runs the TUI until the user quits or a shutdown signal arrives.
 pub async fn run(
     config: &Config,
-    warnings: Vec<String>,
+    mut warnings: Vec<String>,
     services: Services,
 ) -> Result<(), TuiError> {
-    let mut app = App::new(config, services);
-    app.push(Box::new(Welcome::new(warnings)));
+    let (keymap, key_warnings) = Keymap::from_config(&config.keys);
+    for warning in &key_warnings {
+        tracing::warn!(%warning, "keys");
+    }
+    warnings.extend(key_warnings);
+    let mut app = App::new(config, services, keymap);
+    // Signed in: straight to the main screen. Otherwise the empty state.
+    if app.ctx.forges.is_empty() {
+        app.push(Box::new(Welcome::new(warnings)));
+    } else {
+        app.push(Box::new(Shell::new(warnings)));
+    }
     app.run().await
 }
 
@@ -33,7 +46,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(config: &Config, services: Services) -> Self {
+    pub fn new(config: &Config, services: Services, keymap: Keymap) -> Self {
         let (tx, actions) = mpsc::unbounded_channel();
         let theme = Theme::from_config(&config.ui);
         let fps = f64::from(config.ui.max_fps.max(1));
@@ -44,6 +57,7 @@ impl App {
                 config.ui.animations,
                 services,
                 config.refresh.clone(),
+                keymap,
                 tx,
             ),
             actions,
@@ -158,7 +172,46 @@ impl App {
                     self.quit = true;
                 }
             }
-            Action::Redraw | Action::Data(_) => {}
+            Action::Redraw => {}
+            // Background results and toasts concern every view, not just
+            // the one on top (e.g. the shell under a detail view).
+            Action::Data(_) | Action::Toast(_) => {
+                let mut follow_ups = Vec::new();
+                for view in &mut self.views {
+                    follow_ups.extend(view.update(&action, &self.ctx));
+                }
+                for next in follow_ups {
+                    self.on_action(next);
+                }
+                self.dirty = true;
+                return;
+            }
+            Action::CycleAccount => {
+                let accounts: Vec<_> = self
+                    .ctx
+                    .forges
+                    .iter()
+                    .map(|f| f.account().clone())
+                    .collect();
+                self.ctx.account_filter = match &self.ctx.account_filter {
+                    None => accounts.first().cloned(),
+                    Some(current) => accounts
+                        .iter()
+                        .position(|a| a == current)
+                        .and_then(|i| accounts.get(i + 1))
+                        .cloned(),
+                };
+            }
+            Action::ShowDetail(ref detail) => {
+                let view = match detail {
+                    Detail::Focus { account, item } => {
+                        DetailView::focus(account.clone(), (**item).clone())
+                    }
+                };
+                self.push(Box::new(view));
+                return;
+            }
+            Action::Run(_) => {}
             Action::OpenLogin => {
                 if let Some(flow) = self.ctx.login.clone() {
                     self.push(Box::new(LoginView::new(flow)));
@@ -168,12 +221,13 @@ impl App {
             Action::AccountAdded(ref handle) => {
                 tracing::info!(account = %handle.0.account(), "account added");
                 self.ctx.forges.add(Arc::clone(&handle.0));
-                // Close the sign-in screen and refresh what is below it.
-                self.views.pop();
-                if let Some(view) = self.views.last_mut() {
-                    view.mount(&self.ctx);
-                }
-                self.dirty = true;
+                // Leave the empty state: from now on the main screen.
+                self.views.clear();
+                self.push(Box::new(Shell::new(Vec::new())));
+                self.on_action(Action::Toast(Toast::success(format!(
+                    "signed in as @{}",
+                    handle.0.account().login
+                ))));
                 return;
             }
         }

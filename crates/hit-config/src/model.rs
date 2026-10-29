@@ -15,6 +15,10 @@ pub struct Config {
     pub focus: FocusConfig,
     pub refresh: RefreshConfig,
     pub cache: CacheConfig,
+    /// Key bindings: command name → keys, replacing that command's defaults
+    /// (e.g. `down = ["j", "down", "n"]`). Unknown names are reported by
+    /// the TUI, which owns the command list.
+    pub keys: BTreeMap<String, Vec<String>>,
     /// Per-host settings, keyed by host name (e.g. `ghe.example.com`).
     pub hosts: BTreeMap<String, HostConfig>,
 }

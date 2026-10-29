@@ -1420,7 +1420,7 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "hit-auth"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "hit-auth",
  "hit-core",
@@ -1443,7 +1443,7 @@ dependencies = [
 
 [[package]]
 name = "hit-cache"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "chacha20poly1305",
  "getrandom 0.3.4",
@@ -1461,7 +1461,7 @@ dependencies = [
 
 [[package]]
 name = "hit-cli"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "arboard",
  "clap",
@@ -1486,7 +1486,7 @@ dependencies = [
 
 [[package]]
 name = "hit-config"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "dirs",
  "serde",
@@ -1498,7 +1498,7 @@ dependencies = [
 
 [[package]]
 name = "hit-core"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "async-trait",
  "jiff",
@@ -1510,7 +1510,7 @@ dependencies = [
 
 [[package]]
 name = "hit-forge-mock"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "async-trait",
  "hit-core",
@@ -1521,7 +1521,7 @@ dependencies = [
 
 [[package]]
 name = "hit-github"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "async-trait",
  "hit-auth",
@@ -1542,7 +1542,7 @@ dependencies = [
 
 [[package]]
 name = "hit-tui"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "arboard",
  "async-trait",

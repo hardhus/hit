@@ -2,11 +2,11 @@ use std::{sync::Arc, time::Instant};
 
 use hit_cache::Cache;
 use hit_config::RefreshConfig;
-use hit_core::{Forges, auth::LoginFlow};
-use ratatui::{Frame, layout::Rect};
+use hit_core::{AccountId, Forge, Forges, auth::LoginFlow};
+use ratatui::{Frame, layout::Rect, style::Color};
 use tokio::sync::mpsc;
 
-use crate::{Action, Event, Theme};
+use crate::{Action, Event, Theme, keymap::Keymap};
 
 /// What the TUI is connected to, built by the binary.
 #[derive(Default)]
@@ -19,7 +19,7 @@ pub struct Services {
     pub cache: Option<Arc<Cache>>,
 }
 
-/// Shared, read-mostly context handed to every view.
+/// Shared context handed to every view. Only the app mutates it.
 pub struct Ctx {
     pub theme: Theme,
     pub animations: bool,
@@ -27,6 +27,10 @@ pub struct Ctx {
     pub login: Option<Arc<dyn LoginFlow>>,
     pub cache: Option<Arc<Cache>>,
     pub refresh: RefreshConfig,
+    pub keymap: Keymap,
+    /// Only this account is shown; `None` shows all (audit D-039). Future
+    /// profiles will set this instead of views knowing about accounts.
+    pub account_filter: Option<AccountId>,
     started: Instant,
     tx: mpsc::UnboundedSender<Action>,
 }
@@ -37,6 +41,7 @@ impl Ctx {
         animations: bool,
         services: Services,
         refresh: RefreshConfig,
+        keymap: Keymap,
         tx: mpsc::UnboundedSender<Action>,
     ) -> Self {
         Self {
@@ -46,6 +51,8 @@ impl Ctx {
             login: services.login,
             cache: services.cache,
             refresh,
+            keymap,
+            account_filter: None,
             started: Instant::now(),
             tx,
         }
@@ -60,6 +67,7 @@ impl Ctx {
             false,
             services,
             RefreshConfig::default(),
+            Keymap::default(),
             tx,
         );
         (ctx, rx)
@@ -73,6 +81,42 @@ impl Ctx {
     /// Channel for actions produced outside input handling (background tasks).
     pub fn sender(&self) -> mpsc::UnboundedSender<Action> {
         self.tx.clone()
+    }
+
+    /// Whether `account` passes the account filter.
+    pub fn shows(&self, account: &AccountId) -> bool {
+        self.account_filter.as_ref().is_none_or(|a| a == account)
+    }
+
+    /// The forges currently shown.
+    pub fn active_forges(&self) -> impl Iterator<Item = &Arc<dyn Forge>> {
+        self.forges.iter().filter(|f| self.shows(f.account()))
+    }
+
+    pub fn multi_account(&self) -> bool {
+        self.forges.len() > 1
+    }
+
+    /// A stable color per account for badges.
+    pub fn account_color(&self, account: &AccountId) -> Color {
+        let t = &self.theme;
+        let palette = [
+            t.accent,
+            t.accent_alt,
+            t.success,
+            t.warning,
+            t.info,
+            t.highlight,
+        ];
+        let index = self
+            .forges
+            .iter()
+            .position(|f| f.account() == account)
+            .unwrap_or(0);
+        palette
+            .get(index % palette.len())
+            .copied()
+            .unwrap_or(t.accent)
     }
 }
 

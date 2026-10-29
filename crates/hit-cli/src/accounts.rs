@@ -50,12 +50,23 @@ pub fn api_options(account: &Account, config: &Config) -> ApiOptions {
 }
 
 /// The token for `account`: the environment first, then its store.
+///
+/// An environment token belongs to one person, so it is only used when
+/// `account` is the only account on its host; otherwise every account would
+/// load the same person's data (and share a cache key).
 pub fn token(
     account: &Account,
+    accounts: &Accounts,
     paths: &Paths,
 ) -> Result<Option<(Secret, TokenSource)>, StoreError> {
     if let Some(found) = env_token(&account.host, &env) {
-        return Ok(Some(found));
+        if accounts.on_host(&account.host).count() == 1 {
+            return Ok(Some(found));
+        }
+        tracing::warn!(
+            account = %account.key(),
+            "ignoring the environment token: several accounts are signed in on this host"
+        );
     }
     let source = match account.storage {
         Storage::Keyring => TokenSource::Keyring,
@@ -140,7 +151,7 @@ pub fn forges(config: &Config, paths: &Paths) -> (Forges, Vec<String>) {
                 continue;
             }
         };
-        match token(account, paths) {
+        match token(account, &accounts, paths) {
             Ok(Some((secret, source))) => {
                 tracing::info!(account = %key, %source, "account loaded");
                 let api = Api::new(http.clone(), host, secret, api_options(account, config));
