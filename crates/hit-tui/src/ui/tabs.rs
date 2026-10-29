@@ -23,7 +23,9 @@ pub struct TabBar<'a> {
     pub theme: &'a Theme,
     /// Current underline position (start column, width), possibly mid-glide.
     pub underline: (f32, f32),
-    /// Phase for the logo gradient.
+    /// Show the gradient ` hit ` logo before the tabs.
+    pub logo: bool,
+    /// Phase for the logo and underline gradients.
     pub phase: f32,
     /// Shown at the right end (accounts, mode badges).
     pub right: Line<'static>,
@@ -35,8 +37,10 @@ impl TabBar<'_> {
     pub fn render(&self, frame: &mut Frame, area: Rect) -> Vec<(u16, u16)> {
         let t = self.theme;
         let mut spans = vec![Span::raw(" ")];
-        spans.extend(t.gradient_line(" hit ", 12, self.phase).spans);
-        spans.push(Span::raw("  "));
+        if self.logo {
+            spans.extend(t.gradient_line(" hit ", 12, self.phase).spans);
+            spans.push(Span::raw("  "));
+        }
         let mut column = spans.iter().map(Span::width).sum::<usize>() as u16;
 
         let mut positions = Vec::with_capacity(self.tabs.len());

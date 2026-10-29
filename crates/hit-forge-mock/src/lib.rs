@@ -163,6 +163,12 @@ impl PullRequests for MockForge {
                 StateFilter::All => true,
             })
             .filter(|pr| query.author.as_ref().is_none_or(|a| &pr.author.login == a))
+            .filter(|pr| {
+                query
+                    .reviewer
+                    .as_ref()
+                    .is_none_or(|r| pr.requested_reviewers.iter().any(|u| &u.login == r))
+            })
             .filter(|pr| matches_search(&pr.title, query.search.as_deref()))
             .cloned()
             .collect();

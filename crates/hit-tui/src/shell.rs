@@ -21,7 +21,7 @@ use crate::{
     browser,
     keymap::{Command, Scope},
     layout::{LayoutStrategy, TabsLayout},
-    screens::{FocusTab, InboxTab, Placeholder, Tab, TabArea},
+    screens::{FocusTab, InboxTab, Placeholder, PullsTab, Tab, TabArea},
     ui::{
         chips::bold,
         hints,
@@ -52,12 +52,7 @@ impl Shell {
             tabs: vec![
                 Box::new(FocusTab::new()),
                 Box::new(InboxTab::new()),
-                Box::new(Placeholder::new(
-                    "Pull requests",
-                    "◈",
-                    "details, checks, reviews and diffs",
-                    "F6",
-                )),
+                Box::new(PullsTab::new()),
                 Box::new(Placeholder::new(
                     "Issues",
                     "○",
@@ -394,6 +389,7 @@ impl View for Shell {
             } else {
                 underline
             },
+            logo: true,
             phase: if ctx.animations {
                 ctx.time() * 0.1
             } else {
@@ -525,7 +521,7 @@ mod tests {
         shell.handle_event(&key(KeyCode::Char('3')), &ctx);
         assert_eq!(shell.active, 2);
         let screen = render(&mut shell, &ctx);
-        assert!(screen.contains("coming in F6"), "{screen}");
+        assert!(screen.contains("review requested"), "{screen}");
 
         shell.handle_event(&key(KeyCode::Tab), &ctx);
         assert_eq!(shell.active, 3);

@@ -721,6 +721,15 @@ index 3f2a1c4..9b7e0d2 100644
      }
      Err(UploadError::RetriesExhausted)
  }
+@@ -40,4 +45,7 @@ impl UploadError {
+     pub fn is_transient(&self) -> bool {
+-        matches!(self, Self::Timeout | Self::ServerError(_))
++        matches!(self, Self::Timeout | Self::ServerError(_) | Self::ConnectionReset | Self::TooManyRequests { .. })
+     }
++
++    /// How long the server asked us to wait before trying again (429 responses carry a Retry-After header).
++    pub fn retry_after(&self) -> Option<Duration> { match self { Self::TooManyRequests { retry_after } => *retry_after, _ => None } }
+ }
 diff --git a/tests/upload.rs b/tests/upload.rs
 new file mode 100644
 index 0000000..5e6f7a8

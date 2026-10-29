@@ -7,7 +7,7 @@ use hit_config::SortOrder;
 use hit_core::{
     AccountId, ForgeError, ItemRef,
     focus::{FocusItem, FocusReason, FocusSubject},
-    model::{Mergeable, PrState, ReviewDecision},
+    model::{Mergeable, PrState, PullRequest, ReviewDecision},
 };
 use ratatui::{
     Frame,
@@ -376,101 +376,7 @@ pub fn preview_lines(account: &AccountId, item: &FocusItem, ctx: &Ctx) -> Vec<Li
     };
 
     match &item.subject {
-        FocusSubject::PullRequest(pr) => {
-            let state = match pr.state {
-                PrState::Open if pr.is_draft() => Span::styled("draft", bold(t.muted)),
-                PrState::Open => Span::styled("open", bold(t.success)),
-                PrState::Merged => Span::styled("merged", bold(t.highlight)),
-                PrState::Closed => Span::styled("closed", bold(t.danger)),
-            };
-            lines.push(field(
-                "state",
-                vec![
-                    state,
-                    Span::styled(
-                        format!("  {} ← {}", pr.base_ref, pr.head_ref),
-                        Style::new().fg(t.fg),
-                    ),
-                ],
-            ));
-            lines.push(field(
-                "author",
-                vec![Span::styled(
-                    format!(
-                        "@{} · opened {} · updated {}",
-                        pr.author.login,
-                        sync::ago(pr.created_at),
-                        sync::ago(pr.updated_at)
-                    ),
-                    Style::new().fg(t.fg),
-                )],
-            ));
-            if let (Some(add), Some(del)) = (pr.additions, pr.deletions) {
-                let files = pr.changed_files.unwrap_or(0);
-                lines.push(field(
-                    "changes",
-                    vec![
-                        Span::styled(format!("+{add}"), bold(t.success)),
-                        Span::raw(" "),
-                        Span::styled(format!("−{del}"), bold(t.danger)),
-                        Span::styled(
-                            format!("  {files} file{}", if files == 1 { "" } else { "s" }),
-                            muted,
-                        ),
-                    ],
-                ));
-            }
-            if let Some(decision) = pr.review_decision {
-                let (text, color) = match decision {
-                    ReviewDecision::Approved => ("approved", t.success),
-                    ReviewDecision::ChangesRequested => ("changes requested", t.warning),
-                    ReviewDecision::ReviewRequired => ("review required", t.muted),
-                };
-                lines.push(field("review", vec![Span::styled(text, bold(color))]));
-            }
-            if let Some(checks) = &pr.checks {
-                lines.push(field("checks", chips::checks_spans(checks, t)));
-            }
-            if pr.mergeable == Some(Mergeable::Conflicting) {
-                lines.push(field(
-                    "merge",
-                    vec![Span::styled(
-                        "⚠ conflicts with the base branch",
-                        bold(t.warning),
-                    )],
-                ));
-            }
-            if !pr.requested_reviewers.is_empty() {
-                let names: Vec<String> = pr
-                    .requested_reviewers
-                    .iter()
-                    .map(|u| format!("@{}", u.login))
-                    .collect();
-                lines.push(field(
-                    "reviewers",
-                    vec![Span::styled(names.join(", "), Style::new().fg(t.fg))],
-                ));
-            }
-            if !pr.assignees.is_empty() {
-                let names: Vec<String> = pr
-                    .assignees
-                    .iter()
-                    .map(|u| format!("@{}", u.login))
-                    .collect();
-                lines.push(field(
-                    "assignees",
-                    vec![Span::styled(names.join(", "), Style::new().fg(t.fg))],
-                ));
-            }
-            if !pr.labels.is_empty() {
-                let mut spans = Vec::new();
-                for label in &pr.labels {
-                    spans.push(chips::label_span(label, t));
-                    spans.push(Span::raw(" "));
-                }
-                lines.push(field("labels", spans));
-            }
-        }
+        FocusSubject::PullRequest(pr) => lines.extend(pr_fields(pr, ctx)),
         FocusSubject::Issue(issue) => {
             let state = if issue.is_open() {
                 Span::styled("open", bold(t.success))
@@ -517,6 +423,113 @@ pub fn preview_lines(account: &AccountId, item: &FocusItem, ctx: &Ctx) -> Vec<Li
                 lines.push(field("labels", spans));
             }
         }
+    }
+    lines
+}
+
+/// The fields of a pull request (state, branches, changes, review, checks…),
+/// shared by the Focus and Pull requests previews.
+pub fn pr_fields(pr: &PullRequest, ctx: &Ctx) -> Vec<Line<'static>> {
+    let t = &ctx.theme;
+    let muted = Style::new().fg(t.muted);
+    let field = |name: &str, value: Vec<Span<'static>>| {
+        let mut spans = vec![Span::styled(format!("{name:<10}"), muted)];
+        spans.extend(value);
+        Line::from(spans)
+    };
+    let mut lines = Vec::new();
+    let state = match pr.state {
+        PrState::Open if pr.is_draft() => Span::styled("draft", bold(t.muted)),
+        PrState::Open => Span::styled("open", bold(t.success)),
+        PrState::Merged => Span::styled("merged", bold(t.highlight)),
+        PrState::Closed => Span::styled("closed", bold(t.danger)),
+    };
+    lines.push(field(
+        "state",
+        vec![
+            state,
+            Span::styled(
+                format!("  {} ← {}", pr.base_ref, pr.head_ref),
+                Style::new().fg(t.fg),
+            ),
+        ],
+    ));
+    lines.push(field(
+        "author",
+        vec![Span::styled(
+            format!(
+                "@{} · opened {} · updated {}",
+                pr.author.login,
+                sync::ago(pr.created_at),
+                sync::ago(pr.updated_at)
+            ),
+            Style::new().fg(t.fg),
+        )],
+    ));
+    if let (Some(add), Some(del)) = (pr.additions, pr.deletions) {
+        let files = pr.changed_files.unwrap_or(0);
+        lines.push(field(
+            "changes",
+            vec![
+                Span::styled(format!("+{add}"), bold(t.success)),
+                Span::raw(" "),
+                Span::styled(format!("−{del}"), bold(t.danger)),
+                Span::styled(
+                    format!("  {files} file{}", if files == 1 { "" } else { "s" }),
+                    muted,
+                ),
+            ],
+        ));
+    }
+    if let Some(decision) = pr.review_decision {
+        let (text, color) = match decision {
+            ReviewDecision::Approved => ("approved", t.success),
+            ReviewDecision::ChangesRequested => ("changes requested", t.warning),
+            ReviewDecision::ReviewRequired => ("review required", t.muted),
+        };
+        lines.push(field("review", vec![Span::styled(text, bold(color))]));
+    }
+    if let Some(checks) = &pr.checks {
+        lines.push(field("checks", chips::checks_spans(checks, t)));
+    }
+    if pr.mergeable == Some(Mergeable::Conflicting) {
+        lines.push(field(
+            "merge",
+            vec![Span::styled(
+                "⚠ conflicts with the base branch",
+                bold(t.warning),
+            )],
+        ));
+    }
+    if !pr.requested_reviewers.is_empty() {
+        let names: Vec<String> = pr
+            .requested_reviewers
+            .iter()
+            .map(|u| format!("@{}", u.login))
+            .collect();
+        lines.push(field(
+            "reviewers",
+            vec![Span::styled(names.join(", "), Style::new().fg(t.fg))],
+        ));
+    }
+    if !pr.assignees.is_empty() {
+        let names: Vec<String> = pr
+            .assignees
+            .iter()
+            .map(|u| format!("@{}", u.login))
+            .collect();
+        lines.push(field(
+            "assignees",
+            vec![Span::styled(names.join(", "), Style::new().fg(t.fg))],
+        ));
+    }
+    if !pr.labels.is_empty() {
+        let mut spans = Vec::new();
+        for label in &pr.labels {
+            spans.push(chips::label_span(label, t));
+            spans.push(Span::raw(" "));
+        }
+        lines.push(field("labels", spans));
     }
     lines
 }
@@ -609,9 +622,16 @@ impl Tab for FocusTab {
             }
             Command::Open => {
                 let (account, item) = self.selected_item(ctx)?;
-                return Some(Action::ShowDetail(Detail::Focus {
-                    account,
-                    item: Box::new(item),
+                return Some(Action::ShowDetail(match item.subject {
+                    FocusSubject::PullRequest(pr) => Detail::Pull {
+                        account,
+                        item: pr.reference.clone(),
+                        summary: Some(Box::new(pr)),
+                    },
+                    FocusSubject::Issue(_) => Detail::Focus {
+                        account,
+                        item: Box::new(item),
+                    },
                 }));
             }
             Command::Browser => {
@@ -706,9 +726,7 @@ impl Tab for FocusTab {
                     Err(e) => data.error = Some(e.clone()),
                 }
             }
-            DataEvent::Login(_)
-            | DataEvent::Notifications { .. }
-            | DataEvent::MarkedRead { .. } => {}
+            _ => {}
         }
     }
 
@@ -998,7 +1016,9 @@ mod tests {
         assert_eq!(tab.list.selected, 1, "row 0 is the first group's header");
         assert!(matches!(
             tab.command(Command::Open, &ctx),
-            Some(Action::ShowDetail(Detail::Focus { .. }))
+            Some(Action::ShowDetail(
+                Detail::Pull { .. } | Detail::Focus { .. }
+            ))
         ));
         assert!(
             tab.status(&ctx)

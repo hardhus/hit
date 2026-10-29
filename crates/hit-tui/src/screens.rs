@@ -4,13 +4,15 @@
 mod focus;
 mod inbox;
 mod placeholder;
+mod pulls;
 
 use hit_core::{AccountId, ItemRef};
 use ratatui::{Frame, layout::Rect, text::Span};
 
-pub use focus::{FocusTab, preview_lines};
+pub use focus::{FocusTab, pr_fields, preview_lines, spinner};
 pub use inbox::{InboxTab, notification_lines};
 pub use placeholder::Placeholder;
+pub use pulls::{PullsTab, pr_icon, pr_status_spans};
 
 use crate::{Action, Ctx, Event, keymap::Command};
 

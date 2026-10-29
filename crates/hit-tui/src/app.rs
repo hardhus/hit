@@ -12,7 +12,7 @@ use crate::{
     keymap::Keymap,
     shell::Shell,
     terminal::{self, Term, TerminalGuard},
-    views::{DetailView, LoginView, Welcome},
+    views::{DetailView, LoginView, PullView, Welcome},
 };
 
 /// Runs the TUI until the user quits or a shutdown signal arrives.
@@ -203,16 +203,28 @@ impl App {
                 };
             }
             Action::ShowDetail(ref detail) => {
-                let view = match detail {
+                let view: Box<dyn View> = match detail {
                     Detail::Focus { account, item } => {
-                        DetailView::focus(account.clone(), (**item).clone())
+                        Box::new(DetailView::focus(account.clone(), (**item).clone()))
                     }
                     Detail::Notification {
                         account,
                         notification,
-                    } => DetailView::notification(account.clone(), (**notification).clone()),
+                    } => Box::new(DetailView::notification(
+                        account.clone(),
+                        (**notification).clone(),
+                    )),
+                    Detail::Pull {
+                        account,
+                        item,
+                        summary,
+                    } => Box::new(PullView::new(
+                        account.clone(),
+                        item.clone(),
+                        summary.as_deref().cloned(),
+                    )),
                 };
-                self.push(Box::new(view));
+                self.push(view);
                 return;
             }
             Action::Run(_) => {}

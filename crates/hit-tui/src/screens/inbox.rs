@@ -9,7 +9,7 @@ use std::{
 use crossterm::event::KeyCode;
 use hit_config::MarkRead;
 use hit_core::{
-    AccountId, ForgeError,
+    AccountId, ForgeError, ItemKind,
     model::{Notification, NotificationId, NotificationReason, SubjectKind},
 };
 use ratatui::{
@@ -529,6 +529,15 @@ impl Tab for InboxTab {
             Command::Open => {
                 let (account, n) = self.selected(ctx)?;
                 self.on_opened(&account, &n, ctx);
+                if let Some(item) = n.subject.item.clone()
+                    && item.kind == ItemKind::PullRequest
+                {
+                    return Some(Action::ShowDetail(Detail::Pull {
+                        account,
+                        item,
+                        summary: None,
+                    }));
+                }
                 return Some(Action::ShowDetail(Detail::Notification {
                     account,
                     notification: Box::new(n),

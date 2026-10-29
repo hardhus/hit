@@ -45,6 +45,8 @@ pub struct PrQuery {
     pub state: StateFilter,
     /// Only pull requests by this login.
     pub author: Option<String>,
+    /// Only pull requests waiting for this login's review (directly or via a team).
+    pub reviewer: Option<String>,
     /// Free text matched against titles.
     pub search: Option<String>,
     pub sort: Sort,

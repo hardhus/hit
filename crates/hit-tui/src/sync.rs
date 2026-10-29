@@ -9,14 +9,14 @@ use std::{future::Future, sync::Arc, time::Duration};
 
 use hit_cache::{Cache, Vault};
 use hit_core::{
-    Forge, ForgeError, Notifications, Timestamp,
-    model::{Notification, NotificationId},
-    query::{NotificationQuery, PageRequest, Scope},
+    Forge, ForgeError, ItemRef, Notifications, Timestamp,
+    model::{Notification, NotificationId, PullRequest, PullRequestDetail},
+    query::{NotificationQuery, PageRequest, PrQuery, Scope},
 };
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::{sync::mpsc, task::JoinHandle};
 
-use crate::{Action, DataEvent};
+use crate::{Action, DataEvent, Theme, highlight::highlight_diff};
 
 /// A value and where it came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,12 +49,13 @@ fn store_for(cache: Option<Arc<Cache>>, forge: &dyn Forge) -> Store {
     Some((cache?, vault(forge)?))
 }
 
-async fn cached<T>(store: &Store, key: &'static str) -> Option<Loaded<T>>
+async fn cached<T>(store: &Store, key: &str) -> Option<Loaded<T>>
 where
     T: DeserializeOwned + Send + 'static,
 {
     let (cache, vault) = store.clone()?;
-    tokio::task::spawn_blocking(move || cache.get::<T>(&vault, key))
+    let key = key.to_owned();
+    tokio::task::spawn_blocking(move || cache.get::<T>(&vault, &key))
         .await
         .ok()
         .flatten()
@@ -65,14 +66,15 @@ where
         })
 }
 
-async fn save<T>(store: &Store, key: &'static str, value: T)
+async fn save<T>(store: &Store, key: &str, value: T)
 where
     T: Serialize + Send + 'static,
 {
     let Some((cache, vault)) = store.clone() else {
         return;
     };
-    let result = tokio::task::spawn_blocking(move || cache.put(&vault, key, &value)).await;
+    let owned = key.to_owned();
+    let result = tokio::task::spawn_blocking(move || cache.put(&vault, &owned, &value)).await;
     if let Ok(Err(e)) = result {
         tracing::warn!(error = %e, key, "could not update the cache");
     }
@@ -81,7 +83,7 @@ where
 /// One stale-while-revalidate round.
 async fn load<T, F, Fut>(
     store: &Store,
-    key: &'static str,
+    key: &str,
     use_cache: bool,
     fetch: F,
     send: &(dyn Fn(Result<Loaded<T>, ForgeError>) + Send + Sync),
@@ -311,6 +313,86 @@ pub fn spawn_mark_read(
             result,
         }));
     });
+}
+
+/// One page of pull requests for a list view (cached per view).
+pub fn spawn_pulls(
+    forge: Arc<dyn Forge>,
+    cache: Option<Arc<Cache>>,
+    view: &'static str,
+    query: PrQuery,
+    tx: mpsc::UnboundedSender<Action>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let store = store_for(cache, forge.as_ref());
+        let account = forge.account().clone();
+        let send = |result: Result<Loaded<Vec<PullRequest>>, ForgeError>| {
+            let _ = tx.send(Action::Data(DataEvent::Pulls {
+                account: account.clone(),
+                view,
+                result: result.map(|l| Loaded {
+                    value: Arc::new(l.value),
+                    fetched_at: l.fetched_at,
+                    fresh: l.fresh,
+                }),
+            }));
+        };
+        let fetch = || async {
+            match forge.pull_requests() {
+                Some(pulls) => pulls
+                    .list(&query, &PageRequest::first(50))
+                    .await
+                    .map(|page| page.items),
+                None => Err(ForgeError::Unsupported("pull requests")),
+            }
+        };
+        load(&store, &format!("pulls:{view}"), true, fetch, &send).await;
+    })
+}
+
+/// A pull request's detail (cached, so reopening is instant) and its diff
+/// (highlighted off the UI thread).
+pub fn spawn_pull(
+    forge: Arc<dyn Forge>,
+    cache: Option<Arc<Cache>>,
+    item: ItemRef,
+    theme: Theme,
+    tx: mpsc::UnboundedSender<Action>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let Some(pulls) = forge.pull_requests() else {
+            let _ = tx.send(Action::Data(DataEvent::PullDetail {
+                item,
+                result: Err(ForgeError::Unsupported("pull requests")),
+            }));
+            return;
+        };
+        let store = store_for(cache, forge.as_ref());
+        let send = |result: Result<Loaded<PullRequestDetail>, ForgeError>| {
+            let _ = tx.send(Action::Data(DataEvent::PullDetail {
+                item: item.clone(),
+                result: result.map(|l| Loaded {
+                    value: Arc::new(l.value),
+                    fetched_at: l.fetched_at,
+                    fresh: l.fresh,
+                }),
+            }));
+        };
+        let detail = || pulls.get(&item);
+        let key = format!("pull:{item}");
+        let (_, diff) = tokio::join!(load(&store, &key, true, detail, &send), pulls.diff(&item));
+        let result = match diff {
+            Ok(diff) => tokio::task::spawn_blocking(move || highlight_diff(diff, &theme))
+                .await
+                .map(Arc::new)
+                .map_err(|e| ForgeError::InvalidResponse(format!("highlighting failed: {e}"))),
+            Err(e) => Err(e),
+        };
+        let _ = tx.send(Action::Data(DataEvent::PullDiff {
+            item: item.clone(),
+            result,
+        }));
+    })
 }
 
 /// "just now", "5m ago", "3h ago", "2d ago".

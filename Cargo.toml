@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.0.7"
+version = "0.0.8"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT OR Apache-2.0"
@@ -32,6 +32,10 @@ crossterm = { version = "0.29", features = ["event-stream"] }
 
 # storage
 rusqlite = { version = "0.41", features = ["bundled"] }
+
+# rendering
+syntect = { version = "5", default-features = false, features = ["parsing", "default-syntaxes", "regex-fancy"] }
+pulldown-cmark = { version = "0.13", default-features = false }
 
 # domain
 jiff = { version = "0.2", features = ["serde"] }

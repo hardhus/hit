@@ -1,13 +1,13 @@
 use std::{fmt, sync::Arc};
 
 use hit_core::{
-    AccountId, Forge, ForgeError,
+    AccountId, Forge, ForgeError, ItemRef,
     auth::DeviceCode,
     focus::FocusItem,
-    model::{Notification, NotificationId},
+    model::{Notification, NotificationId, PullRequest, PullRequestDetail},
 };
 
-use crate::{keymap::Command, sync::Loaded};
+use crate::{highlight::HighlightedDiff, keymap::Command, sync::Loaded};
 
 /// Something the app should do. Views return actions from input handling, and
 /// background tasks send them through [`crate::Ctx::sender`].
@@ -53,6 +53,19 @@ pub enum DataEvent {
         unread_only: bool,
         result: Result<Loaded<Arc<Vec<Notification>>>, ForgeError>,
     },
+    Pulls {
+        account: AccountId,
+        view: &'static str,
+        result: Result<Loaded<Arc<Vec<PullRequest>>>, ForgeError>,
+    },
+    PullDetail {
+        item: ItemRef,
+        result: Result<Loaded<Arc<PullRequestDetail>>, ForgeError>,
+    },
+    PullDiff {
+        item: ItemRef,
+        result: Result<Arc<HighlightedDiff>, ForgeError>,
+    },
     /// The outcome of marking `ids` read (all of them if the request was
     /// "mark all").
     MarkedRead {
@@ -82,6 +95,12 @@ pub enum Detail {
     Notification {
         account: AccountId,
         notification: Box<Notification>,
+    },
+    /// A pull request; `summary` (if known) shows while the detail loads.
+    Pull {
+        account: AccountId,
+        item: ItemRef,
+        summary: Option<Box<PullRequest>>,
     },
 }
 
