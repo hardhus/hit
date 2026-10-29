@@ -20,7 +20,7 @@ use crate::{
     browser,
     keymap::{Command, Scope},
     screens::{notification_lines, preview_lines},
-    ui::popup::Popup,
+    ui::{popup::Popup, wrapped_height},
 };
 
 enum Content {
@@ -141,15 +141,6 @@ impl View for DetailView {
     fn is_animating(&self) -> bool {
         Popup::is_animating(Some(self.opened))
     }
-}
-
-/// Rows `lines` take when wrapped to `width` (word wrapping can only add
-/// rows, so this may undercount by a little on very long words; that only
-/// stops scrolling slightly early, never past the end).
-fn wrapped_height(lines: &[Line<'_>], width: u16) -> u16 {
-    let width = usize::from(width.max(1));
-    let rows: usize = lines.iter().map(|l| l.width().max(1).div_ceil(width)).sum();
-    u16::try_from(rows).unwrap_or(u16::MAX)
 }
 
 #[cfg(test)]

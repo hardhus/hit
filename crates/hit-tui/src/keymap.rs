@@ -86,7 +86,14 @@ commands! {
     MarkAllRead  => "mark_all_read", List,   "Mark all shown notifications read",["M"];
     ToggleUnread => "toggle_unread", List,   "Unread only / all notifications",  ["u"];
     Participating=> "participating", List,   "Only notifications for you",       ["p"];
-    CycleReason  => "cycle_reason",  List,   "Filter by reason",                 ["f"];
+    CycleReason  => "cycle_reason",  List,   "Filter by reason / switch view",   ["f"];
+    NextFile     => "next_file",     List,   "Next file in a diff",              ["]"];
+    PrevFile     => "prev_file",     List,   "Previous file in a diff",          ["["];
+    NextHunk     => "next_hunk",     List,   "Next change in a diff",            ["}"];
+    PrevHunk     => "prev_hunk",     List,   "Previous change in a diff",        ["{"];
+    SplitDiff    => "split_diff",    List,   "Unified / side-by-side diff",      ["t"];
+    ScrollLeft   => "scroll_left",   List,   "Scroll a diff left",               ["h", "left"];
+    ScrollRight  => "scroll_right",  List,   "Scroll a diff right",              ["l", "right"];
 }
 
 /// One key with modifiers. Letters keep their case (`G` is shift+g).

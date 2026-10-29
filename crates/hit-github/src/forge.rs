@@ -215,6 +215,12 @@ impl PullRequests for GithubForge {
             .map(|a| qualifier_login(a).map(|a| format!("author:{a}")))
             .transpose()?
             .unwrap_or_default();
+        let reviewer = query
+            .reviewer
+            .as_deref()
+            .map(|r| qualifier_login(r).map(|r| format!("review-requested:{r}")))
+            .transpose()?
+            .unwrap_or_default();
         let text = query.search.as_deref().map(search_text).unwrap_or_default();
         let q = join(&[
             "is:pr",
@@ -222,6 +228,7 @@ impl PullRequests for GithubForge {
             state_qualifier(query.state),
             &scope_qualifier(&query.scope, self.me())?,
             &author,
+            &reviewer,
             sort_qualifier(query.sort),
             &text,
         ]);
