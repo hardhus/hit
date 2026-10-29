@@ -292,7 +292,7 @@ async fn status(config: &Config, paths: &Paths) -> Result<ExitCode> {
             style::pink(format!("@{}", account.login))
         );
         let host = GithubHost::parse(account.host.as_str())?;
-        let (token, source) = match accounts::token(account, paths) {
+        let (token, source) = match accounts::token(account, &all, paths) {
             Ok(Some(found)) => found,
             Ok(None) => {
                 problems = true;

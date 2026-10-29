@@ -170,6 +170,7 @@ pub(crate) fn parse(text: &str) -> (Config, Vec<ConfigWarning>) {
         focus: section(&mut root, "focus", &mut warnings),
         refresh: section(&mut root, "refresh", &mut warnings),
         cache: section(&mut root, "cache", &mut warnings),
+        keys: section(&mut root, "keys", &mut warnings),
         hosts: section(&mut root, "hosts", &mut warnings),
     };
 

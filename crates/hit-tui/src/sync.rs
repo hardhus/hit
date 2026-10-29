@@ -114,17 +114,21 @@ pub fn spawn_focus(
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let store = store_for(cache, forge.as_ref());
+        let account = forge.account().clone();
         let send = |result: Result<Loaded<Vec<_>>, ForgeError>| {
             let result = result.map(|l| Loaded {
                 value: Arc::new(l.value),
                 fetched_at: l.fetched_at,
                 fresh: l.fresh,
             });
-            let _ = tx.send(Action::Data(DataEvent::Focus(result)));
+            let _ = tx.send(Action::Data(DataEvent::Focus {
+                account: account.clone(),
+                result,
+            }));
         };
         let mut first = true;
         loop {
-            let _ = tx.send(Action::Data(DataEvent::Refreshing));
+            let _ = tx.send(Action::Data(DataEvent::Refreshing(account.clone())));
             let fetch = || async {
                 match forge.focus() {
                     Some(focus) => focus.items(&Scope::All).await,
@@ -153,8 +157,12 @@ pub fn spawn_unread(
             return;
         };
         let store = store_for(cache, forge.as_ref());
+        let account = forge.account().clone();
         let send = |result| {
-            let _ = tx.send(Action::Data(DataEvent::UnreadCount(result)));
+            let _ = tx.send(Action::Data(DataEvent::UnreadCount {
+                account: account.clone(),
+                result,
+            }));
         };
         let mut first = true;
         loop {
@@ -221,7 +229,7 @@ mod tests {
         let mut events = Vec::new();
         while events.len() < n {
             if let Some(Action::Data(event)) = rx.recv().await
-                && !matches!(event, DataEvent::Refreshing)
+                && !matches!(event, DataEvent::Refreshing(_))
             {
                 events.push(event);
             }
@@ -245,7 +253,10 @@ mod tests {
         .await
         .unwrap();
         let events = focus_events(&mut rx, 1).await;
-        let DataEvent::Focus(Ok(first)) = &events[0] else {
+        let DataEvent::Focus {
+            result: Ok(first), ..
+        } = &events[0]
+        else {
             panic!("expected focus data");
         };
         assert!(first.fresh);
@@ -255,7 +266,14 @@ mod tests {
             .await
             .unwrap();
         let events = focus_events(&mut rx, 2).await;
-        let (DataEvent::Focus(Ok(cached)), DataEvent::Focus(Ok(fresh))) = (&events[0], &events[1])
+        let (
+            DataEvent::Focus {
+                result: Ok(cached), ..
+            },
+            DataEvent::Focus {
+                result: Ok(fresh), ..
+            },
+        ) = (&events[0], &events[1])
         else {
             panic!("expected cached then fresh: {events:?}");
         };
@@ -278,8 +296,11 @@ mod tests {
         }));
         spawn_unread(failing, Some(cache), false, tx).await.unwrap();
         let events = focus_events(&mut rx, 2).await;
-        assert!(matches!(&events[0], DataEvent::UnreadCount(Ok(l)) if !l.fresh));
-        assert!(matches!(&events[1], DataEvent::UnreadCount(Err(_))));
+        assert!(matches!(&events[0], DataEvent::UnreadCount { result: Ok(l), .. } if !l.fresh));
+        assert!(matches!(
+            &events[1],
+            DataEvent::UnreadCount { result: Err(_), .. }
+        ));
     }
 
     #[test]

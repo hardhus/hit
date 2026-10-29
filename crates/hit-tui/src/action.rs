@@ -1,8 +1,8 @@
 use std::{fmt, sync::Arc};
 
-use hit_core::{Forge, ForgeError, auth::DeviceCode, focus::FocusItem};
+use hit_core::{AccountId, Forge, ForgeError, auth::DeviceCode, focus::FocusItem};
 
-use crate::sync::Loaded;
+use crate::{keymap::Command, sync::Loaded};
 
 /// Something the app should do. Views return actions from input handling, and
 /// background tasks send them through [`crate::Ctx::sender`].
@@ -19,16 +19,30 @@ pub enum Action {
     OpenLogin,
     /// A sign-in finished; the account is ready to use.
     AccountAdded(ForgeHandle),
+    /// Show one account only, cycling through them, then all again.
+    CycleAccount,
+    /// Open a full-screen detail view.
+    ShowDetail(Detail),
+    /// A short message in the corner.
+    Toast(Toast),
+    /// Run a command as if its key was pressed (from the palette).
+    Run(Command),
 }
 
-/// Results of background fetches. Payloads are behind `Arc` so actions stay
-/// cheap to clone.
+/// Results of background fetches, tagged with the account they belong to.
+/// Payloads are behind `Arc` so actions stay cheap to clone.
 #[derive(Debug, Clone)]
 pub enum DataEvent {
     /// A refresh round started.
-    Refreshing,
-    Focus(Result<Loaded<Arc<Vec<FocusItem>>>, ForgeError>),
-    UnreadCount(Result<Loaded<usize>, ForgeError>),
+    Refreshing(AccountId),
+    Focus {
+        account: AccountId,
+        result: Result<Loaded<Arc<Vec<FocusItem>>>, ForgeError>,
+    },
+    UnreadCount {
+        account: AccountId,
+        result: Result<Loaded<usize>, ForgeError>,
+    },
     Login(LoginEvent),
 }
 
@@ -40,6 +54,53 @@ pub enum LoginEvent {
         opened: bool,
     },
     Failed(String),
+}
+
+#[derive(Debug, Clone)]
+pub enum Detail {
+    Focus {
+        account: AccountId,
+        item: Box<FocusItem>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToastKind {
+    Info,
+    Success,
+    Warning,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Toast {
+    pub kind: ToastKind,
+    pub message: String,
+}
+
+impl Toast {
+    fn new(kind: ToastKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+        }
+    }
+
+    pub fn info(message: impl Into<String>) -> Self {
+        Self::new(ToastKind::Info, message)
+    }
+
+    pub fn success(message: impl Into<String>) -> Self {
+        Self::new(ToastKind::Success, message)
+    }
+
+    pub fn warning(message: impl Into<String>) -> Self {
+        Self::new(ToastKind::Warning, message)
+    }
+
+    pub fn error(message: impl Into<String>) -> Self {
+        Self::new(ToastKind::Error, message)
+    }
 }
 
 #[derive(Clone)]

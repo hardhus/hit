@@ -60,6 +60,12 @@ enabled = true
 # Drop cached data older than this many days (1-365).
 max_age_days = 30
 
+[keys]
+# Rebind any command: name = [keys]. Replaces that command's defaults.
+# Press `?` in hit to see every command and its keys. Examples:
+# down = ["j", "down"]
+# palette = [":", "ctrl+p"]
+
 # Per-host settings for GitHub Enterprise Server. To sign in with the device
 # flow there, register an OAuth app on that server and set its client id:
 #
