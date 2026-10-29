@@ -4,6 +4,7 @@
 use hit_core::{
     AccountId,
     focus::{FocusItem, FocusSubject},
+    model::Notification,
 };
 use ratatui::{
     Frame,
@@ -18,31 +19,64 @@ use crate::{
     anim::Moment,
     browser,
     keymap::{Command, Scope},
-    screens::preview_lines,
+    screens::{notification_lines, preview_lines},
     ui::popup::Popup,
 };
 
+enum Content {
+    Focus(FocusItem),
+    Notification(Notification),
+}
+
 pub struct DetailView {
     account: AccountId,
-    item: FocusItem,
+    content: Content,
     scroll: u16,
     opened: Moment,
 }
 
 impl DetailView {
-    pub fn focus(account: AccountId, item: FocusItem) -> Self {
+    fn new(account: AccountId, content: Content) -> Self {
         Self {
             account,
-            item,
+            content,
             scroll: 0,
             opened: Moment::now(),
         }
     }
 
-    fn url(&self) -> &str {
-        match &self.item.subject {
-            FocusSubject::PullRequest(pr) => &pr.url,
-            FocusSubject::Issue(issue) => &issue.url,
+    pub fn focus(account: AccountId, item: FocusItem) -> Self {
+        Self::new(account, Content::Focus(item))
+    }
+
+    pub fn notification(account: AccountId, notification: Notification) -> Self {
+        Self::new(account, Content::Notification(notification))
+    }
+
+    fn url(&self) -> String {
+        match &self.content {
+            Content::Focus(item) => match &item.subject {
+                FocusSubject::PullRequest(pr) => pr.url.clone(),
+                FocusSubject::Issue(issue) => issue.url.clone(),
+            },
+            Content::Notification(n) => n.subject.url.clone().unwrap_or_default(),
+        }
+    }
+
+    fn title(&self) -> String {
+        match &self.content {
+            Content::Focus(item) => item.subject.reference().to_string(),
+            Content::Notification(n) => match &n.subject.item {
+                Some(item) => item.to_string(),
+                None => n.repo.to_string(),
+            },
+        }
+    }
+
+    fn lines(&self, ctx: &Ctx) -> Vec<Line<'static>> {
+        match &self.content {
+            Content::Focus(item) => preview_lines(&self.account, item, ctx),
+            Content::Notification(n) => notification_lines(&self.account, n, ctx),
         }
     }
 }
@@ -59,8 +93,8 @@ impl View for DetailView {
             Command::Back | Command::Open => return Some(Action::Back),
             Command::Quit => return Some(Action::Quit),
             Command::Browser => {
-                return Some(Action::Toast(match browser::open(self.url()) {
-                    Ok(()) => Toast::success(format!("opened {}", self.item.subject.reference())),
+                return Some(Action::Toast(match browser::open(&self.url()) {
+                    Ok(()) => Toast::success(format!("opened {}", self.title())),
                     Err(toast) => toast,
                 }));
             }
@@ -70,7 +104,7 @@ impl View for DetailView {
     }
 
     fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) {
-        let title = self.item.subject.reference().to_string();
+        let title = self.title();
         let footer = format!(
             "{} scroll · {} browser · {} back",
             ctx.keymap.label(Command::Down),
@@ -92,7 +126,7 @@ impl View for DetailView {
             width: inner.width.saturating_sub(2),
             ..inner
         };
-        let lines = preview_lines(&self.account, &self.item, ctx);
+        let lines = self.lines(ctx);
         // Never scroll past the end: the last line stays at the bottom.
         let max_scroll = wrapped_height(&lines, content.width).saturating_sub(content.height);
         self.scroll = self.scroll.min(max_scroll);

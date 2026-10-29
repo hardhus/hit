@@ -10,6 +10,7 @@ use std::{future::Future, sync::Arc, time::Duration};
 use hit_cache::{Cache, Vault};
 use hit_core::{
     Forge, ForgeError, Notifications, Timestamp,
+    model::{Notification, NotificationId},
     query::{NotificationQuery, PageRequest, Scope},
 };
 use serde::{Serialize, de::DeserializeOwned};
@@ -202,6 +203,114 @@ async fn count_unread(notifications: &dyn Notifications) -> Result<usize, ForgeE
         }
     }
     Ok(total)
+}
+
+/// Pages fetched for the inbox (newest first, 50 per page).
+const INBOX_PAGES: usize = 4;
+
+/// The inbox, at the forge's poll interval (once if `poll` is off). Unread
+/// and all notifications are cached separately.
+pub fn spawn_inbox(
+    forge: Arc<dyn Forge>,
+    cache: Option<Arc<Cache>>,
+    unread_only: bool,
+    poll: bool,
+    tx: mpsc::UnboundedSender<Action>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        if forge.notifications().is_none() {
+            return;
+        }
+        let store = store_for(cache, forge.as_ref());
+        let account = forge.account().clone();
+        let key = if unread_only {
+            "inbox:unread"
+        } else {
+            "inbox:all"
+        };
+        let send = |result: Result<Loaded<Vec<Notification>>, ForgeError>| {
+            let result = result.map(|l| Loaded {
+                value: Arc::new(l.value),
+                fetched_at: l.fetched_at,
+                fresh: l.fresh,
+            });
+            let _ = tx.send(Action::Data(DataEvent::Notifications {
+                account: account.clone(),
+                unread_only,
+                result,
+            }));
+        };
+        let mut first = true;
+        loop {
+            let fetch = || async {
+                match forge.notifications() {
+                    Some(notifications) => fetch_inbox(notifications, unread_only).await,
+                    None => Ok(Vec::new()),
+                }
+            };
+            load(&store, key, first, fetch, &send).await;
+            first = false;
+            if !poll {
+                break;
+            }
+            let interval = forge
+                .notifications()
+                .and_then(Notifications::poll_interval)
+                .unwrap_or(DEFAULT_POLL);
+            tokio::time::sleep(interval).await;
+        }
+    })
+}
+
+async fn fetch_inbox(
+    notifications: &dyn Notifications,
+    unread_only: bool,
+) -> Result<Vec<Notification>, ForgeError> {
+    let query = NotificationQuery {
+        unread_only,
+        ..NotificationQuery::default()
+    };
+    let mut page = PageRequest::first(50);
+    let mut items = Vec::new();
+    for _ in 0..INBOX_PAGES {
+        let result = notifications.list(&query, &page).await?;
+        items.extend(result.items);
+        match result.next {
+            Some(cursor) => page = PageRequest::after(cursor, 50),
+            None => break,
+        }
+    }
+    Ok(items)
+}
+
+/// Marks exactly `ids` read on the forge (never "everything": that would
+/// also hit notifications the user has not seen), reporting the outcome so
+/// the view can confirm or undo its optimistic update.
+pub fn spawn_mark_read(
+    forge: Arc<dyn Forge>,
+    ids: Vec<NotificationId>,
+    tx: mpsc::UnboundedSender<Action>,
+) {
+    tokio::spawn(async move {
+        let result = match forge.notifications() {
+            None => Err(ForgeError::Unsupported("notifications")),
+            Some(notifications) => {
+                let mut result = Ok(());
+                for id in &ids {
+                    if let Err(e) = notifications.mark_read(id).await {
+                        result = Err(e);
+                        break;
+                    }
+                }
+                result
+            }
+        };
+        let _ = tx.send(Action::Data(DataEvent::MarkedRead {
+            account: forge.account().clone(),
+            ids,
+            result,
+        }));
+    });
 }
 
 /// "just now", "5m ago", "3h ago", "2d ago".

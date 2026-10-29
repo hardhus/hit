@@ -78,6 +78,15 @@ commands! {
     Back         => "back",          List,   "Back / close",                     ["esc"];
     Filter       => "filter",        List,   "Filter the list",                  ["/"];
     Browser      => "browser",       List,   "Open in the browser",              ["o"];
+    NextGroup    => "next_group",    List,   "Jump to the next group",           ["J"];
+    PrevGroup    => "prev_group",    List,   "Jump to the previous group",       ["K"];
+    Sort         => "sort",          List,   "Newest / oldest first",            ["s"];
+    ToggleGroups => "toggle_groups", List,   "Group / flat list",                ["v"];
+    MarkRead     => "mark_read",     List,   "Mark notification read",           ["m"];
+    MarkAllRead  => "mark_all_read", List,   "Mark all shown notifications read",["M"];
+    ToggleUnread => "toggle_unread", List,   "Unread only / all notifications",  ["u"];
+    Participating=> "participating", List,   "Only notifications for you",       ["p"];
+    CycleReason  => "cycle_reason",  List,   "Filter by reason",                 ["f"];
 }
 
 /// One key with modifiers. Letters keep their case (`G` is shift+g).

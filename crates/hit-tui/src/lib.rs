@@ -28,4 +28,4 @@ pub use event::Event;
 pub use sync::Loaded;
 pub use terminal::{install_panic_hook, restore_terminal};
 pub use theme::Theme;
-pub use view::{Ctx, Services, View};
+pub use view::{Ctx, Prefs, Services, View};

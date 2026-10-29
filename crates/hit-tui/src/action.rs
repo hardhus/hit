@@ -1,6 +1,11 @@
 use std::{fmt, sync::Arc};
 
-use hit_core::{AccountId, Forge, ForgeError, auth::DeviceCode, focus::FocusItem};
+use hit_core::{
+    AccountId, Forge, ForgeError,
+    auth::DeviceCode,
+    focus::FocusItem,
+    model::{Notification, NotificationId},
+};
 
 use crate::{keymap::Command, sync::Loaded};
 
@@ -43,6 +48,18 @@ pub enum DataEvent {
         account: AccountId,
         result: Result<Loaded<usize>, ForgeError>,
     },
+    Notifications {
+        account: AccountId,
+        unread_only: bool,
+        result: Result<Loaded<Arc<Vec<Notification>>>, ForgeError>,
+    },
+    /// The outcome of marking `ids` read (all of them if the request was
+    /// "mark all").
+    MarkedRead {
+        account: AccountId,
+        ids: Vec<NotificationId>,
+        result: Result<(), ForgeError>,
+    },
     Login(LoginEvent),
 }
 
@@ -61,6 +78,10 @@ pub enum Detail {
     Focus {
         account: AccountId,
         item: Box<FocusItem>,
+    },
+    Notification {
+        account: AccountId,
+        notification: Box<Notification>,
     },
 }
 
