@@ -2,12 +2,14 @@
 //! never decides the layout (audit D-036).
 
 mod focus;
+mod inbox;
 mod placeholder;
 
 use hit_core::{AccountId, ItemRef};
 use ratatui::{Frame, layout::Rect, text::Span};
 
 pub use focus::{FocusTab, preview_lines};
+pub use inbox::{InboxTab, notification_lines};
 pub use placeholder::Placeholder;
 
 use crate::{Action, Ctx, Event, keymap::Command};
@@ -91,4 +93,9 @@ pub trait Tab {
 
     /// The tab became visible (for entrance animations).
     fn shown(&mut self) {}
+
+    /// The tab is no longer visible.
+    fn hidden(&mut self, ctx: &Ctx) {
+        let _ = ctx;
+    }
 }

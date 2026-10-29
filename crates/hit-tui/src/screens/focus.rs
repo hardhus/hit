@@ -3,9 +3,10 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use crossterm::event::KeyCode;
+use hit_config::SortOrder;
 use hit_core::{
     AccountId, ForgeError, ItemRef,
-    focus::{FocusItem, FocusSubject},
+    focus::{FocusItem, FocusReason, FocusSubject},
     model::{Mergeable, PrState, ReviewDecision},
 };
 use ratatui::{
@@ -59,6 +60,55 @@ pub struct FocusTab {
     list_height: u16,
     /// The highlight glides to the selected row.
     cursor: Option<Tween>,
+    /// Runtime overrides of `[focus] sort` / `group` (`s` / `v`).
+    sort: Option<SortOrder>,
+    group: Option<bool>,
+    /// A jump from the palette is applied on the next frame.
+    reveal_pending: bool,
+}
+
+/// Focus groups, in priority order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Group {
+    Review,
+    Mine,
+    Others,
+}
+
+impl Group {
+    fn of(item: &FocusItem) -> Self {
+        match item.reasons.first() {
+            Some(FocusReason::ReviewRequested) => Self::Review,
+            Some(
+                FocusReason::ChangesRequested
+                | FocusReason::ChecksFailing
+                | FocusReason::ReadyToMerge,
+            ) => Self::Mine,
+            _ => Self::Others,
+        }
+    }
+
+    fn title(self) -> &'static str {
+        match self {
+            Self::Review => "Waiting for your review",
+            Self::Mine => "Your pull requests",
+            Self::Others => "Mentions & assigned",
+        }
+    }
+
+    fn color(self, ctx: &Ctx) -> ratatui::style::Color {
+        match self {
+            Self::Review => ctx.theme.accent,
+            Self::Mine => ctx.theme.accent_alt,
+            Self::Others => ctx.theme.info,
+        }
+    }
+}
+
+/// A list position: a group header or an item.
+enum Slot<'a> {
+    Header(Group, usize),
+    Item(&'a AccountId, &'a FocusItem),
 }
 
 impl Drop for FocusTab {
@@ -85,6 +135,63 @@ impl FocusTab {
         for task in self.tasks.drain(..) {
             task.abort();
         }
+    }
+
+    fn sort_order(&self, ctx: &Ctx) -> SortOrder {
+        self.sort.unwrap_or(ctx.prefs.focus_sort)
+    }
+
+    fn grouped(&self, ctx: &Ctx) -> bool {
+        self.group.unwrap_or(ctx.prefs.focus_group)
+    }
+
+    /// The list: items in the chosen order, under group headers if grouped.
+    fn slots<'a>(&'a self, ctx: &Ctx) -> Vec<Slot<'a>> {
+        let mut items = self.visible(ctx);
+        if self.sort_order(ctx) == SortOrder::Oldest {
+            items.reverse();
+        }
+        if !self.grouped(ctx) {
+            return items.into_iter().map(|(a, i)| Slot::Item(a, i)).collect();
+        }
+        // Stable: keeps the time order inside each group.
+        items.sort_by_key(|(_, item)| Group::of(item));
+        let mut slots = Vec::with_capacity(items.len() + 3);
+        let mut current = None;
+        for (index, (account, item)) in items.iter().enumerate() {
+            let group = Group::of(item);
+            if current != Some(group) {
+                let count = items[index..]
+                    .iter()
+                    .take_while(|(_, i)| Group::of(i) == group)
+                    .count();
+                slots.push(Slot::Header(group, count));
+                current = Some(group);
+            }
+            slots.push(Slot::Item(account, item));
+        }
+        slots
+    }
+
+    fn rows(&self, ctx: &Ctx) -> Vec<Row> {
+        self.slots(ctx)
+            .into_iter()
+            .map(|slot| match slot {
+                Slot::Header(group, count) => Self::header(group, count, ctx),
+                Slot::Item(account, item) => Self::row(account, item, ctx),
+            })
+            .collect()
+    }
+
+    fn header(group: Group, count: usize, ctx: &Ctx) -> Row {
+        let t = &ctx.theme;
+        let color = group.color(ctx);
+        Row::Header(Line::from(vec![
+            Span::styled("▸ ", bold(color)),
+            Span::styled(group.title(), bold(color)),
+            Span::styled(format!("  {count} "), Style::new().fg(t.muted)),
+            Span::styled("─".repeat(200), Style::new().fg(t.border)),
+        ]))
     }
 
     /// Shown items: account filter, then the text filter, newest first.
@@ -123,31 +230,36 @@ impl FocusTab {
     }
 
     fn remember_selection(&mut self, ctx: &Ctx) {
-        let picked = self
-            .visible(ctx)
-            .get(self.list.selected)
-            .map(|(account, item)| ((*account).clone(), item.subject.reference().clone()));
-        self.selected = picked;
+        let picked = match self.slots(ctx).get(self.list.selected) {
+            Some(Slot::Item(account, item)) => {
+                Some(((*account).clone(), item.subject.reference().clone()))
+            }
+            _ => None,
+        };
+        if picked.is_some() {
+            self.selected = picked;
+        }
     }
 
-    /// Puts the cursor back on the remembered item after data changed.
+    /// Puts the cursor back on the remembered item after data or order
+    /// changed.
     fn restore_selection(&mut self, ctx: &Ctx) {
         let Some((account, item)) = &self.selected else {
             return;
         };
-        if let Some(index) = self
-            .visible(ctx)
-            .iter()
-            .position(|(a, i)| *a == account && i.subject.reference() == item)
-        {
+        let found = self.slots(ctx).iter().position(|slot| {
+            matches!(slot, Slot::Item(a, i) if *a == account && i.subject.reference() == item)
+        });
+        if let Some(index) = found {
             self.list.selected = index;
         }
     }
 
     fn selected_item(&self, ctx: &Ctx) -> Option<(AccountId, FocusItem)> {
-        self.visible(ctx)
-            .get(self.list.selected)
-            .map(|(account, item)| ((*account).clone(), (*item).clone()))
+        match self.slots(ctx).get(self.list.selected) {
+            Some(Slot::Item(account, item)) => Some(((*account).clone(), (*item).clone())),
+            _ => None,
+        }
     }
 
     fn row(account: &AccountId, item: &FocusItem, ctx: &Ctx) -> Row {
@@ -178,11 +290,11 @@ impl FocusTab {
             format!("  @{author} · {}", sync::ago(item.updated_at)),
             Style::new().fg(t.muted),
         ));
-        Row {
-            top: Line::from(top),
-            bottom: Line::from(bottom),
-            accent: chips::reasons_color(&item.reasons, t),
-        }
+        Row::item(
+            Line::from(top),
+            Line::from(bottom),
+            chips::reasons_color(&item.reasons, t),
+        )
     }
 
     fn render_empty(&self, frame: &mut Frame, area: Rect, ctx: &Ctx) {
@@ -432,7 +544,7 @@ impl Tab for FocusTab {
 
     fn mount(&mut self, ctx: &Ctx) {
         self.stop();
-        let every = match ctx.refresh.focus_minutes {
+        let every = match ctx.prefs.refresh.focus_minutes {
             0 => None,
             minutes => Some(Duration::from_secs(u64::from(minutes) * 60)),
         };
@@ -450,7 +562,7 @@ impl Tab for FocusTab {
             self.tasks.push(sync::spawn_unread(
                 Arc::clone(forge),
                 ctx.cache.clone(),
-                ctx.refresh.notifications,
+                ctx.prefs.refresh.notifications,
                 ctx.sender(),
             ));
         }
@@ -460,15 +572,41 @@ impl Tab for FocusTab {
     }
 
     fn command(&mut self, command: Command, ctx: &Ctx) -> Option<Action> {
-        let len = self.visible(ctx).len();
+        let rows = self.rows(ctx);
         let page = ListState::page(self.list_height) as isize;
         match command {
-            Command::Down => self.list.move_by(1, len),
-            Command::Up => self.list.move_by(-1, len),
-            Command::Top => self.list.top(),
-            Command::Bottom => self.list.bottom(len),
-            Command::PageDown => self.list.move_by(page, len),
-            Command::PageUp => self.list.move_by(-page, len),
+            Command::Down => self.list.move_by(1, &rows),
+            Command::Up => self.list.move_by(-1, &rows),
+            Command::Top => self.list.top(&rows),
+            Command::Bottom => self.list.bottom(&rows),
+            Command::PageDown => self.list.move_by(page, &rows),
+            Command::PageUp => self.list.move_by(-page, &rows),
+            Command::NextGroup => self.list.jump_group(true, &rows),
+            Command::PrevGroup => self.list.jump_group(false, &rows),
+            Command::Sort => {
+                self.remember_selection(ctx);
+                let next = match self.sort_order(ctx) {
+                    SortOrder::Newest => SortOrder::Oldest,
+                    SortOrder::Oldest => SortOrder::Newest,
+                };
+                self.sort = Some(next);
+                self.restore_selection(ctx);
+                return Some(Action::Toast(Toast::info(match next {
+                    SortOrder::Newest => "newest first",
+                    SortOrder::Oldest => "oldest first",
+                })));
+            }
+            Command::ToggleGroups => {
+                self.remember_selection(ctx);
+                let grouped = !self.grouped(ctx);
+                self.group = Some(grouped);
+                self.restore_selection(ctx);
+                return Some(Action::Toast(Toast::info(if grouped {
+                    "grouped by what is asked of you"
+                } else {
+                    "one list"
+                })));
+            }
             Command::Open => {
                 let (account, item) = self.selected_item(ctx)?;
                 return Some(Action::ShowDetail(Detail::Focus {
@@ -486,7 +624,7 @@ impl Tab for FocusTab {
             Command::Filter => self.editing = true,
             Command::Back if !self.filter.is_empty() => {
                 self.filter.clear();
-                self.list.top();
+                self.restore_selection(ctx);
             }
             Command::Refresh => {
                 self.mount(ctx);
@@ -508,7 +646,7 @@ impl Tab for FocusTab {
         };
         if let Some(c) = typed_char(key) {
             self.filter.push(c);
-            self.list.top();
+            self.list.top(&self.rows(ctx));
             self.remember_selection(ctx);
             return Some(Action::Redraw);
         }
@@ -520,7 +658,7 @@ impl Tab for FocusTab {
                 self.editing = false;
                 // One match left: Enter opens it right away.
                 if self.visible(ctx).len() == 1 {
-                    self.list.top();
+                    self.list.top(&self.rows(ctx));
                     self.remember_selection(ctx);
                     return self.command(Command::Open, ctx);
                 }
@@ -531,7 +669,7 @@ impl Tab for FocusTab {
             }
             _ => return None,
         }
-        self.list.top();
+        self.list.top(&self.rows(ctx));
         self.remember_selection(ctx);
         Some(Action::Redraw)
     }
@@ -568,7 +706,9 @@ impl Tab for FocusTab {
                     Err(e) => data.error = Some(e.clone()),
                 }
             }
-            DataEvent::Login(_) => {}
+            DataEvent::Login(_)
+            | DataEvent::Notifications { .. }
+            | DataEvent::MarkedRead { .. } => {}
         }
     }
 
@@ -593,12 +733,12 @@ impl Tab for FocusTab {
         }
 
         self.list_height = list_area.height;
-        let rows: Vec<Row> = self
-            .visible(ctx)
-            .into_iter()
-            .map(|(account, item)| Self::row(account, item, ctx))
-            .collect();
-        if rows.is_empty() {
+        if self.reveal_pending {
+            self.reveal_pending = false;
+            self.restore_selection(ctx);
+        }
+        let rows = self.rows(ctx);
+        if !rows.iter().any(Row::is_item) {
             self.render_empty(frame, list_area, ctx);
         } else {
             let appeared = if ctx.animations { self.appeared } else { None };
@@ -713,8 +853,9 @@ impl Tab for FocusTab {
             (&[Command::Down, Command::Up], "move"),
             (&[Command::Open], "open"),
             (&[Command::Browser], "browser"),
+            (&[Command::NextGroup, Command::PrevGroup], "groups"),
             (&[Command::Filter], "filter"),
-            (&[Command::Refresh], "refresh"),
+            (&[Command::Sort], "sort"),
         ]
     }
 
@@ -738,6 +879,7 @@ impl Tab for FocusTab {
         self.filter.clear();
         self.editing = false;
         self.selected = Some((account.clone(), item.clone()));
+        self.reveal_pending = true;
         true
     }
 
@@ -850,10 +992,10 @@ mod tests {
     async fn open_and_navigation() {
         let (mut tab, ctx) = loaded_tab().await;
         tab.command(Command::Bottom, &ctx);
-        let last = tab.visible(&ctx).len() - 1;
+        let last = tab.rows(&ctx).len() - 1;
         assert_eq!(tab.list.selected, last);
         tab.command(Command::Top, &ctx);
-        assert_eq!(tab.list.selected, 0);
+        assert_eq!(tab.list.selected, 1, "row 0 is the first group's header");
         assert!(matches!(
             tab.command(Command::Open, &ctx),
             Some(Action::ShowDetail(Detail::Focus { .. }))
@@ -863,5 +1005,54 @@ mod tests {
                 .iter()
                 .any(|s| s.content.contains("need you"))
         );
+    }
+
+    #[tokio::test]
+    async fn groups_in_priority_order_and_sorting() {
+        let (mut tab, ctx) = loaded_tab().await;
+        let groups: Vec<Group> = tab
+            .slots(&ctx)
+            .iter()
+            .filter_map(|s| match s {
+                Slot::Header(group, _) => Some(*group),
+                Slot::Item(..) => None,
+            })
+            .collect();
+        assert_eq!(groups, [Group::Review, Group::Mine, Group::Others]);
+        let screen = render(&mut tab, &ctx, 160);
+        assert!(screen.contains("Waiting for your review"), "{screen}");
+
+        // Sorting keeps the selected item selected.
+        tab.command(Command::Down, &ctx);
+        let before = tab
+            .selected_item(&ctx)
+            .unwrap()
+            .1
+            .subject
+            .reference()
+            .clone();
+        tab.command(Command::Sort, &ctx);
+        assert_eq!(tab.sort_order(&ctx), SortOrder::Oldest);
+        let after = tab
+            .selected_item(&ctx)
+            .unwrap()
+            .1
+            .subject
+            .reference()
+            .clone();
+        assert_eq!(before, after);
+
+        // Flat list: no headers.
+        tab.command(Command::ToggleGroups, &ctx);
+        assert!(tab.rows(&ctx).iter().all(Row::is_item));
+
+        // Group jumps land on items.
+        tab.command(Command::ToggleGroups, &ctx);
+        tab.command(Command::Top, &ctx);
+        tab.command(Command::NextGroup, &ctx);
+        assert!(matches!(
+            tab.slots(&ctx).get(tab.list.selected),
+            Some(Slot::Item(..))
+        ));
     }
 }

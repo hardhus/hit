@@ -6,7 +6,7 @@ use ratatui::{Frame, widgets::Block};
 use tokio::{sync::mpsc, time::MissedTickBehavior};
 
 use crate::{
-    Action, Ctx, Event, Services, Theme, TuiError, View,
+    Action, Ctx, Event, Prefs, Services, Theme, TuiError, View,
     action::{Detail, Toast},
     event::EventSource,
     keymap::Keymap,
@@ -56,7 +56,7 @@ impl App {
                 theme,
                 config.ui.animations,
                 services,
-                config.refresh.clone(),
+                Prefs::from_config(config),
                 keymap,
                 tx,
             ),
@@ -207,6 +207,10 @@ impl App {
                     Detail::Focus { account, item } => {
                         DetailView::focus(account.clone(), (**item).clone())
                     }
+                    Detail::Notification {
+                        account,
+                        notification,
+                    } => DetailView::notification(account.clone(), (**notification).clone()),
                 };
                 self.push(Box::new(view));
                 return;

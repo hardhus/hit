@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::Instant};
 
 use hit_cache::Cache;
-use hit_config::RefreshConfig;
+use hit_config::{Config, InboxConfig, RefreshConfig, SortOrder};
 use hit_core::{AccountId, Forge, Forges, auth::LoginFlow};
 use ratatui::{Frame, layout::Rect, style::Color};
 use tokio::sync::mpsc;
@@ -19,6 +19,26 @@ pub struct Services {
     pub cache: Option<Arc<Cache>>,
 }
 
+/// Preferences views read; from the config, some adjustable at runtime.
+#[derive(Debug, Clone)]
+pub struct Prefs {
+    pub refresh: RefreshConfig,
+    pub focus_sort: SortOrder,
+    pub focus_group: bool,
+    pub inbox: InboxConfig,
+}
+
+impl Prefs {
+    pub fn from_config(config: &Config) -> Self {
+        Self {
+            refresh: config.refresh.clone(),
+            focus_sort: config.focus.sort,
+            focus_group: config.focus.group,
+            inbox: config.inbox.clone(),
+        }
+    }
+}
+
 /// Shared context handed to every view. Only the app mutates it.
 pub struct Ctx {
     pub theme: Theme,
@@ -26,7 +46,7 @@ pub struct Ctx {
     pub forges: Forges,
     pub login: Option<Arc<dyn LoginFlow>>,
     pub cache: Option<Arc<Cache>>,
-    pub refresh: RefreshConfig,
+    pub prefs: Prefs,
     pub keymap: Keymap,
     /// Only this account is shown; `None` shows all (audit D-039). Future
     /// profiles will set this instead of views knowing about accounts.
@@ -40,7 +60,7 @@ impl Ctx {
         theme: Theme,
         animations: bool,
         services: Services,
-        refresh: RefreshConfig,
+        prefs: Prefs,
         keymap: Keymap,
         tx: mpsc::UnboundedSender<Action>,
     ) -> Self {
@@ -50,7 +70,7 @@ impl Ctx {
             forges: services.forges,
             login: services.login,
             cache: services.cache,
-            refresh,
+            prefs,
             keymap,
             account_filter: None,
             started: Instant::now(),
@@ -66,7 +86,7 @@ impl Ctx {
             Theme::jinx(true, true),
             false,
             services,
-            RefreshConfig::default(),
+            Prefs::from_config(&Config::default()),
             Keymap::default(),
             tx,
         );

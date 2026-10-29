@@ -13,6 +13,7 @@ pub struct Config {
     pub log: LogConfig,
     pub auth: AuthConfig,
     pub focus: FocusConfig,
+    pub inbox: InboxConfig,
     pub refresh: RefreshConfig,
     pub cache: CacheConfig,
     /// Key bindings: command name → keys, replacing that command's defaults
@@ -83,6 +84,10 @@ pub struct FocusConfig {
     pub mention_days: u32,
     /// Open issues and pull requests assigned to you.
     pub assigned: bool,
+    /// Order inside each group.
+    pub sort: SortOrder,
+    /// Group by what is asked of you (review, your PRs, mentions).
+    pub group: bool,
 }
 
 impl FocusConfig {
@@ -97,8 +102,50 @@ impl Default for FocusConfig {
             mentions: true,
             mention_days: 14,
             assigned: true,
+            sort: SortOrder::default(),
+            group: true,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SortOrder {
+    /// Most recently updated first.
+    #[default]
+    Newest,
+    Oldest,
+}
+
+/// The notifications inbox.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct InboxConfig {
+    /// Start with unread notifications only.
+    pub unread_only: bool,
+    /// When notifications are marked read on the forge.
+    pub mark_read: MarkRead,
+}
+
+impl Default for InboxConfig {
+    fn default() -> Self {
+        Self {
+            unread_only: true,
+            mark_read: MarkRead::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MarkRead {
+    /// Only with `m` / `M`.
+    #[default]
+    Manual,
+    /// When opened (detail or browser).
+    Open,
+    /// Opened ones, when you leave the Inbox tab.
+    Leave,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

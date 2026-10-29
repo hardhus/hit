@@ -11,7 +11,7 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::Paragraph,
+    widgets::{Paragraph, Wrap},
 };
 
 use crate::{
@@ -21,7 +21,7 @@ use crate::{
     browser,
     keymap::{Command, Scope},
     layout::{LayoutStrategy, TabsLayout},
-    screens::{FocusTab, Placeholder, Tab, TabArea},
+    screens::{FocusTab, InboxTab, Placeholder, Tab, TabArea},
     ui::{
         chips::bold,
         hints,
@@ -51,12 +51,7 @@ impl Shell {
         Self {
             tabs: vec![
                 Box::new(FocusTab::new()),
-                Box::new(Placeholder::new(
-                    "Inbox",
-                    "✉",
-                    "every notification, filtered your way",
-                    "F5",
-                )),
+                Box::new(InboxTab::new()),
                 Box::new(Placeholder::new(
                     "Pull requests",
                     "◈",
@@ -90,6 +85,9 @@ impl Shell {
     fn switch(&mut self, index: usize, ctx: &Ctx) {
         if index >= self.tabs.len() || index == self.active {
             return;
+        }
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            tab.hidden(ctx);
         }
         self.active = index;
         if let Some(tab) = self.tabs.get_mut(index) {
@@ -220,48 +218,82 @@ impl Shell {
         Line::from(spans)
     }
 
+    fn help_section(scope: Scope, ctx: &Ctx) -> Vec<Line<'static>> {
+        let t = &ctx.theme;
+        let mut lines = vec![Line::from(Span::styled(scope.title(), bold(t.accent_alt)))];
+        for &command in Command::ALL.iter().filter(|c| c.scope() == scope) {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("  {:<14}", ctx.keymap.label(command)),
+                    bold(t.accent),
+                ),
+                Span::styled(command.description(), Style::new().fg(t.fg)),
+                Span::styled(format!("  {}", command.name()), Style::new().fg(t.muted)),
+            ]));
+        }
+        lines
+    }
+
     fn render_help(&self, frame: &mut Frame, area: Rect, opened: Moment, ctx: &Ctx) {
         let t = &ctx.theme;
-        let mut lines = Vec::new();
-        for scope in [Scope::Global, Scope::List] {
-            lines.push(Line::from(Span::styled(scope.title(), bold(t.accent_alt))));
-            for &command in Command::ALL.iter().filter(|c| c.scope() == scope) {
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        format!("  {:<16}", ctx.keymap.label(command)),
-                        bold(t.accent),
-                    ),
-                    Span::styled(command.description(), Style::new().fg(t.fg)),
-                    Span::styled(format!("  {}", command.name()), Style::new().fg(t.muted)),
-                ]));
-            }
-            lines.push(Line::raw(""));
-        }
-        lines.push(Line::styled(
-            "Rebind any key in config.toml under [keys], e.g. down = [\"j\", \"n\"]",
+        let mut left = Self::help_section(Scope::Global, ctx);
+        left.push(Line::raw(""));
+        left.push(Line::styled(
+            "Rebind with the dim names under [keys] in config.toml,",
+            Style::new().fg(t.muted),
+        ));
+        left.push(Line::styled(
+            "e.g. down = [\"j\", \"n\"]",
             Style::new().fg(t.muted),
         ));
         if !self.warnings.is_empty() {
-            lines.push(Line::raw(""));
-            lines.push(Line::from(Span::styled("Warnings", bold(t.warning))));
+            left.push(Line::raw(""));
+            left.push(Line::from(Span::styled("Warnings", bold(t.warning))));
             for warning in &self.warnings {
-                lines.push(Line::from(vec![
+                left.push(Line::from(vec![
                     Span::styled("  ! ", bold(t.warning)),
                     Span::styled(warning.clone(), Style::new().fg(t.fg)),
                 ]));
             }
         }
+        let right = Self::help_section(Scope::List, ctx);
+
+        // Two columns when there is room, so it fits small terminals too.
+        let two_columns = area.width >= 100;
+        let (width, height) = if two_columns {
+            (108, left.len().max(right.len()) as u16 + 2)
+        } else {
+            (60, (left.len() + right.len() + 1) as u16 + 2)
+        };
         let inner = Popup {
             title: "keys",
             footer: Some("esc close"),
-            width: 76,
-            height: lines.len() as u16 + 2,
+            width,
+            height,
             border: t.accent,
             theme: t,
             opened: ctx.animations.then_some(opened),
         }
         .render(frame, area);
-        frame.render_widget(Paragraph::new(lines), inner);
+        let inner = Rect {
+            x: inner.x + 1,
+            width: inner.width.saturating_sub(2),
+            ..inner
+        };
+        if two_columns {
+            let [l, r] = ratatui::layout::Layout::horizontal([
+                ratatui::layout::Constraint::Percentage(50),
+                ratatui::layout::Constraint::Percentage(50),
+            ])
+            .areas(inner);
+            frame.render_widget(Paragraph::new(left).wrap(Wrap { trim: true }), l);
+            frame.render_widget(Paragraph::new(right), r);
+        } else {
+            let mut lines = left;
+            lines.push(Line::raw(""));
+            lines.extend(right);
+            frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
+        }
     }
 }
 

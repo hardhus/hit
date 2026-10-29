@@ -43,6 +43,19 @@ mentions = true
 mention_days = 14
 # Open issues and pull requests assigned to you.
 assigned = true
+# Order inside each group: "newest" or "oldest" first (`s` toggles it).
+sort = "newest"
+# Group by what is asked of you; false shows one list (`v` toggles it).
+group = true
+
+[inbox]
+# Start with unread notifications only (`u` toggles it).
+unread_only = true
+# When notifications are marked read on GitHub:
+#   "manual" - only with `m` (selected) and `M` (all shown)
+#   "open"   - also when you open one (detail or browser)
+#   "leave"  - the ones you opened, when you leave the Inbox tab
+mark_read = "manual"
 
 [refresh]
 # Minutes between Action Required refreshes while hit is open (0-1440);
