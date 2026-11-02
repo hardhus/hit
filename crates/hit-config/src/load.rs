@@ -25,6 +25,10 @@ pub enum ConfigError {
         #[source]
         source: io::Error,
     },
+    #[error("{path} has a syntax error; fix it first")]
+    Unparsable { path: PathBuf },
+    #[error("[{section}] in the config file is not a table; fix it first")]
+    NotATable { section: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -368,11 +372,60 @@ mod tests {
         assert!(warnings.is_empty());
     }
 
+    /// The template with its settings switched on, leaving out the examples
+    /// under `[keys]` and `[hosts]`.
+    fn template_uncommented() -> String {
+        let settings = default_toml().split("[keys]").next().unwrap();
+        settings
+            .lines()
+            .map(|line| {
+                line.strip_prefix("# ")
+                    .filter(|rest| {
+                        rest.split_once(" = ").is_some_and(|(key, _)| {
+                            key.chars().all(|c| c.is_ascii_lowercase() || c == '_')
+                        })
+                    })
+                    .unwrap_or(line)
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     #[test]
-    fn default_template_matches_defaults() {
+    fn default_template_sets_nothing_itself() {
         let (config, warnings) = parse(default_toml());
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(config, Config::default());
+        let table: Table = default_toml().parse().unwrap();
+        for (section, keys) in &table {
+            let keys = keys.as_table().unwrap();
+            assert!(keys.is_empty(), "[{section}] pins {keys:?}");
+        }
+    }
+
+    #[test]
+    fn default_template_shows_the_real_defaults() {
+        let text = template_uncommented();
+        let (config, warnings) = parse(&text);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(config, Config::default());
+        // Every setting is really there: all of them spelled out, none left
+        // to fall back on.
+        let table: Table = text.parse().unwrap();
+        let written: Config = table.try_into().unwrap();
+        let defaults = toml::to_string(&Config::default()).unwrap();
+        let defaults: Table = defaults.parse().unwrap();
+        for (section, keys) in &defaults {
+            let Some(keys) = keys.as_table().filter(|k| !k.is_empty()) else {
+                continue;
+            };
+            let shown: Table = text.parse().unwrap();
+            let shown = shown[section].as_table().unwrap();
+            for key in keys.keys() {
+                assert!(shown.contains_key(key), "{section}.{key} is not documented");
+            }
+        }
+        assert_eq!(written, Config::default());
     }
 
     #[test]

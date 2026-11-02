@@ -47,6 +47,15 @@ pub trait Forge: Send + Sync {
         None
     }
 
+    /// Whether this account refuses to write.
+    fn is_read_only(&self) -> bool {
+        false
+    }
+
+    /// Refuses writes from now on. There is deliberately no way back while
+    /// hit runs: leaving read-only mode takes a restart.
+    fn lock_read_only(&self) {}
+
     /// A key only this account's credentials can produce, for encrypting
     /// what hit stores locally about it. `None` disables local caching.
     fn local_key(&self) -> Option<Zeroizing<[u8; 32]>> {

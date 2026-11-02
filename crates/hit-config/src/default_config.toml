@@ -1,79 +1,81 @@
 # hit configuration
 #
-# Every key is optional; anything left out uses the default shown here.
-# Run `hit config check` after editing to see warnings.
+# Every key is optional; anything left out uses the default shown here, and
+# keeps following it if a later version changes it. To change one, remove its #.
+# Run `hit config check` after editing to see warnings. Press `,` in hit to
+# change most of this on screen; your comments here stay.
 
 [general]
 # Inside a git repository, open on that repository (press . for everything).
-repo_context = true
+# repo_context = true
 
 [ui]
 # Keep the terminal background visible behind hit.
-transparent = true
+# transparent = true
 # Color theme. Available: "jinx"
-theme = "jinx"
+# theme = "jinx"
 # Small animations (logo shimmer, spinners, transitions).
-animations = true
+# animations = true
 # Frame cap while something is animating (1-240). Idle screens are not redrawn.
-max_fps = 60
+# max_fps = 60
 
 [log]
 # One of: off, error, warn, info, debug, trace. HIT_LOG overrides this.
-level = "info"
+# level = "info"
 # Log files older than this many days are deleted on startup (1-3650).
-retention_days = 14
+# retention_days = 14
 # Oldest log files are deleted on startup until the total is below this (1-10240).
-max_total_mb = 50
+# max_total_mb = 50
 
 [auth]
 # Never write with any account (comments, reviews, merges…), whatever the
 # token allows. Can also be set per account: `hit auth login --read-only`.
-read_only = false
+# read_only = false
 # In read-only mode, still allow marking notifications read (only your own
 # inbox state changes). Off by default: read-only means hit changes nothing.
-allow_mark_read = false
+# allow_mark_read = false
 
 [focus]
 # What shows up in Action Required, the first thing you see in hit.
 # Pull requests waiting for your review (directly or via a team).
-review_requests = true
+# review_requests = true
 # Your pull requests with requested changes, failing checks, or ready to merge.
-my_pull_requests = true
+# my_pull_requests = true
 # Open issues and pull requests that mention you…
-mentions = true
+# mentions = true
 # …within the last this many days (1-365).
-mention_days = 14
+# mention_days = 14
 # Open issues and pull requests assigned to you.
-assigned = true
+# assigned = true
 # Order inside each group: "newest" or "oldest" first (`s` toggles it).
-sort = "newest"
+# sort = "newest"
 # Group by what is asked of you; false shows one list (`v` toggles it).
-group = true
+# group = true
 
 [inbox]
 # Start with unread notifications only (`u` toggles it).
-unread_only = true
+# unread_only = true
 # When notifications are marked read on GitHub:
 #   "manual" - only with `m` (selected) and `M` (all shown)
 #   "open"   - also when you open one (detail or browser)
 #   "leave"  - the ones you opened, when you leave the Inbox tab
-mark_read = "manual"
+# mark_read = "manual"
 
 [refresh]
 # Minutes between Action Required refreshes while hit is open (0-1440);
 # 0 refreshes only on start and when you press `r`.
-focus_minutes = 5
+# focus_minutes = 5
 # Poll notifications as often as GitHub asks (usually every 60 s). Unchanged
 # results do not count against the rate limit.
-notifications = true
+# notifications = true
 
 [cache]
 # Keep the last known data locally so hit opens instantly and works offline.
 # Encrypted with a key derived from each account's token: unreadable without
 # it, and gone for good when you sign out. `hit cache clear` deletes it all.
-enabled = true
+# enabled = true
 # Drop cached data older than this many days (1-365).
-max_age_days = 30
+# max_age_days = 30
 
 [keys]
 # Rebind any command: name = [keys]. Replaces that command's defaults.
