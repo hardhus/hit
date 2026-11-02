@@ -916,19 +916,20 @@ impl View for PullView {
                             .checks
                             .iter()
                             .any(|check| check.state == CheckState::Pending);
-                        if let Some(task) = self.recheck.take() {
-                            task.abort();
-                        }
-                        if running
-                            && loaded.fresh
-                            && let Some(forge) = ctx.forges.by_account(&self.account)
-                        {
-                            self.recheck = Some(sync::recheck_pull(
-                                Arc::clone(forge),
-                                ctx.cache.clone(),
-                                self.item.clone(),
-                                ctx.sender(),
-                            ));
+                        // Only news decides this: the copy from the cache comes
+                        // first, from the very task that is on its way to the news.
+                        if loaded.fresh {
+                            if let Some(task) = self.recheck.take() {
+                                task.abort();
+                            }
+                            if running && let Some(forge) = ctx.forges.by_account(&self.account) {
+                                self.recheck = Some(sync::recheck_pull(
+                                    Arc::clone(forge),
+                                    ctx.cache.clone(),
+                                    self.item.clone(),
+                                    ctx.sender(),
+                                ));
+                            }
                         }
                     }
                     Err(e) => self.detail_error = Some(e.clone()),
@@ -1197,7 +1198,7 @@ mod tests {
             ..Services::default()
         });
         let mut view = PullView::new(account, item.clone(), None);
-        let mut deliver = |view: &mut PullView, checks: Vec<CheckRun>| {
+        let mut deliver = |view: &mut PullView, checks: Vec<CheckRun>, fresh: bool| {
             detail.checks = checks;
             view.update(
                 &Action::Data(DataEvent::PullDetail {
@@ -1205,7 +1206,7 @@ mod tests {
                     result: Ok(crate::Loaded {
                         value: Arc::new(detail.clone()),
                         fetched_at: Timestamp::now(),
-                        fresh: true,
+                        fresh,
                     }),
                 }),
                 &ctx,
@@ -1216,9 +1217,12 @@ mod tests {
             state,
             url: None,
         };
-        deliver(&mut view, vec![check(CheckState::Pending)]);
+        deliver(&mut view, vec![check(CheckState::Pending)], true);
         assert!(view.recheck.is_some());
-        deliver(&mut view, vec![check(CheckState::Failure)]);
+        // The cached copy the look itself sends first must not cancel it.
+        deliver(&mut view, vec![check(CheckState::Pending)], false);
+        assert!(view.recheck.is_some(), "cancelled by its own cached copy");
+        deliver(&mut view, vec![check(CheckState::Failure)], true);
         assert!(view.recheck.is_none());
     }
 

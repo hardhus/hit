@@ -34,6 +34,7 @@ pub struct Options<'a> {
 
 /// How long a screen must stay quiet to count as settled.
 const SETTLE: Duration = Duration::from_millis(2500);
+const DEMO_SETTLE: Duration = Duration::from_millis(40);
 const PER_PAGE: u16 = 50;
 
 struct Session {
@@ -199,7 +200,9 @@ async fn debug(
             .flatten(),
         ..hit_tui::Services::default()
     };
-    let screens = hit_tui::screens(config, services, keys, *width, *height, SETTLE)
+    // The demo answers at once.
+    let quiet = if options.demo { DEMO_SETTLE } else { SETTLE };
+    let screens = hit_tui::screens(config, services, keys, *width, *height, quiet)
         .await
         .map_err(|e| eyre!(e))?;
     let shown = if *every_step {
