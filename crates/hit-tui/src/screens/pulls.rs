@@ -274,6 +274,9 @@ impl PullsTab {
                     .flat_map(|l| l.value.iter())
                     .map(move |pr| (account, pr))
             })
+            // GitHub's search can be behind: it may still call a merged pull
+            // request open. Each item's own state is not behind.
+            .filter(|(_, pr)| self.current() == View::Closed || pr.is_open())
             .filter(|(_, pr)| {
                 needle.is_empty()
                     || pr.title.to_lowercase().contains(&needle)
@@ -1118,6 +1121,21 @@ mod tests {
 
         assert_eq!(tab.group(&account, &pr), Group::NeedsYou);
         assert_eq!(tab.reasons(&account, &pr, &ctx), [FocusReason::Mentioned]);
+    }
+
+    #[tokio::test]
+    async fn a_merged_pull_request_leaves_the_open_list_even_if_search_lags() {
+        let (mut tab, ctx, _rx) = in_repo().await;
+        let before = tab.visible(&ctx).len();
+        for data in tab.data.values_mut() {
+            if let Some(loaded) = &mut data.items {
+                let listing = Arc::make_mut(&mut loaded.value);
+                if let Some(pr) = listing.items.first_mut() {
+                    pr.state = hit_core::model::PrState::Merged;
+                }
+            }
+        }
+        assert_eq!(tab.visible(&ctx).len(), before - 1);
     }
 
     #[tokio::test]

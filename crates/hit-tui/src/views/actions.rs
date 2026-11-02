@@ -196,7 +196,7 @@ impl View for ActionMenu {
         if lines.is_empty() {
             lines.push(Line::styled(
                 if self.read_only(ctx) {
-                    " This account is read-only: hit writes nothing with it. , opens settings."
+                    " Read-only account: hit writes nothing with it. Settings: ,"
                 } else {
                     " Nothing can be done with this here."
                 },

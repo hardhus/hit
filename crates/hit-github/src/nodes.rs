@@ -14,24 +14,65 @@ use hit_core::{
 use serde::Deserialize;
 
 pub(crate) mod queries {
+    // GitHub refuses a query with a fragment it does not use, so each one
+    // brings only its own.
     pub const FOCUS: &str = concat!(
         include_str!("graphql/focus.graphql"),
-        include_str!("graphql/fragments.graphql")
+        include_str!("graphql/fragment_pr.graphql"),
+        include_str!("graphql/fragment_issue.graphql")
     );
     pub const SEARCH: &str = concat!(
         include_str!("graphql/search.graphql"),
-        include_str!("graphql/fragments.graphql")
+        include_str!("graphql/fragment_pr.graphql"),
+        include_str!("graphql/fragment_issue.graphql")
     );
     pub const PULL: &str = concat!(
         include_str!("graphql/pull.graphql"),
-        include_str!("graphql/fragments.graphql")
+        include_str!("graphql/fragment_pr.graphql")
     );
     pub const REPO_COUNTS: &str = include_str!("graphql/repo_counts.graphql");
     pub const MERGE_OPTIONS: &str = include_str!("graphql/merge_options.graphql");
     pub const ISSUE: &str = concat!(
         include_str!("graphql/issue.graphql"),
-        include_str!("graphql/fragments.graphql")
+        include_str!("graphql/fragment_issue.graphql")
     );
+
+    #[cfg(test)]
+    pub const ALL: [&str; 6] = [FOCUS, SEARCH, PULL, REPO_COUNTS, MERGE_OPTIONS, ISSUE];
+}
+
+#[cfg(test)]
+mod query_tests {
+    use super::queries;
+
+    /// What GitHub checks and a fake server does not: `scripts/graphql.sh`
+    /// checks the rest against the real schema.
+    #[test]
+    fn every_fragment_sent_is_used_and_every_one_used_is_sent() {
+        for query in queries::ALL {
+            let name = |word: &str| word.trim_matches(|c: char| !c.is_alphanumeric()).to_owned();
+            let defined: Vec<String> = query
+                .lines()
+                .filter_map(|line| line.strip_prefix("fragment "))
+                .filter_map(|rest| rest.split_whitespace().next())
+                .map(name)
+                .collect();
+            for fragment in &defined {
+                assert!(
+                    query.contains(&format!("...{fragment}")),
+                    "{fragment} is sent but not used in:\n{query}"
+                );
+            }
+            for used in query.split("...").skip(1) {
+                let used = used.trim_start();
+                if used.starts_with("on ") {
+                    continue;
+                }
+                let used = name(used.split_whitespace().next().unwrap_or_default());
+                assert!(defined.contains(&used), "{used} is used but not sent");
+            }
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -587,7 +628,9 @@ impl MergeRepo {
                 _ => None,
             }
         };
+        // Worth knowing before a merge; there will not be one if it is blocked.
         let warning = match pull.merge_state_status.as_str() {
+            _ if blocked.is_some() => None,
             "UNSTABLE" => Some("some checks are failing"),
             "BEHIND" => Some("the branch is behind its base"),
             "UNKNOWN" => Some("GitHub is still working out whether it can merge"),

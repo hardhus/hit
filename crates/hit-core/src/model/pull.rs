@@ -47,7 +47,7 @@ impl MergeMethod {
 }
 
 /// What the forge says about merging a pull request right now.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MergeOptions {
     /// Never empty.
     pub allowed: Vec<MergeMethod>,

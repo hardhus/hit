@@ -11,26 +11,27 @@ import { join, resolve } from "node:path";
 
 const [schemaPath, packageDir] = process.argv.slice(2);
 const require = createRequire(resolve(packageDir, "package.json"));
-const { buildSchema, parse, specifiedRules, validate, NoDeprecatedCustomRule, NoUnusedFragmentsRule } =
-  require("graphql");
+const { buildSchema, parse, validate, NoDeprecatedCustomRule } = require("graphql");
 
 const queries = "crates/hit-github/src/graphql";
-const fragmentsFile = "fragments.graphql";
-const fragments = readFileSync(join(queries, fragmentsFile), "utf8");
-
-// Queries are sent with the whole fragments file, like `nodes::queries` does,
-// so a fragment one query does not use is fine.
-const rules = specifiedRules.filter((rule) => rule !== NoUnusedFragmentsRule);
+const fragments = {
+  Pr: readFileSync(join(queries, "fragment_pr.graphql"), "utf8"),
+  Iss: readFileSync(join(queries, "fragment_issue.graphql"), "utf8"),
+};
 
 const schema = buildSchema(readFileSync(schemaPath, "utf8"));
 let failed = false;
 
 for (const file of readdirSync(queries).sort()) {
-  if (!file.endsWith(".graphql") || file === fragmentsFile) continue;
+  if (!file.endsWith(".graphql") || file.startsWith("fragment_")) continue;
   const own = readFileSync(join(queries, file), "utf8");
-  const usesFragments = own.includes("...");
-  const document = parse(usesFragments ? own + fragments : own);
-  const errors = validate(schema, document, rules);
+  // Each query brings the fragments it uses, as `nodes::queries` does; every
+  // rule applies, including the one against unused fragments.
+  const sent = Object.entries(fragments)
+    .filter(([name]) => new RegExp(`\\.\\.\\.${name}\\b`).test(own))
+    .map(([, text]) => text);
+  const document = parse([own, ...sent].join("\n"));
+  const errors = validate(schema, document);
   for (const error of errors) {
     console.error(`${file}: ${error.message}`);
     failed = true;

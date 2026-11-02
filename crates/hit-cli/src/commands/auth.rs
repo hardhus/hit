@@ -175,7 +175,11 @@ fn print_scopes(granted: &[String], wanted: &[&str], kind: TokenKind) {
         return;
     }
     println!("  {} scopes: {}", style::muted("•"), granted.join(", "));
-    let missing = oauth::missing_scopes(granted, wanted);
+    let mut missing = oauth::missing_scopes(granted, wanted);
+    // `repo` covers notifications for classic tokens.
+    if granted.iter().any(|scope| scope == "repo") {
+        missing.retain(|scope| *scope != "notifications");
+    }
     if !missing.is_empty() {
         println!(
             "  {} missing scopes: {} (some features will not work)",

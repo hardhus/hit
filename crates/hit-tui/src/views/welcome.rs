@@ -30,8 +30,8 @@ const FEATURES: [(&str, &str); 4] = [
         "what needs you, first thing in the morning",
     ),
     ("Inbox", "every notification, filtered your way"),
-    ("Pull requests", "details, checks and diffs"),
-    ("Issues", "find, read and triage"),
+    ("Pull requests", "read, review and merge"),
+    ("Issues", "find, read and answer"),
 ];
 
 pub struct Welcome {

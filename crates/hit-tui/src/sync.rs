@@ -11,7 +11,7 @@ use futures::future::try_join_all;
 use hit_cache::{Cache, Vault};
 use hit_config::ConfigEdit;
 use hit_core::{
-    Forge, ForgeError, ItemActions, ItemRef, Notifications, RepoRef, Timestamp,
+    Forge, ForgeError, ItemActions, ItemRef, Notifications, PullRequests, RepoRef, Timestamp,
     model::{
         CheckState, CloseReason, Issue, IssueDetail, MergeMethod, Notification, NotificationId,
         PullRequest, PullRequestDetail, Repo, RepoCounts, ReviewVerdict,
@@ -783,6 +783,56 @@ pub fn spawn_issue(
     })
 }
 
+async fn load_pull_detail(
+    pulls: &dyn PullRequests,
+    store: &Store,
+    item: &ItemRef,
+    tx: &mpsc::UnboundedSender<Action>,
+) {
+    let send = |result: Result<Loaded<PullRequestDetail>, ForgeError>| {
+        let _ = tx.send(Action::Data(DataEvent::PullDetail {
+            item: item.clone(),
+            result: result.map(|l| Loaded {
+                value: Arc::new(l.value),
+                fetched_at: l.fetched_at,
+                fresh: l.fresh,
+            }),
+        }));
+    };
+    // What broke comes first, so it is one key away.
+    let detail = || async {
+        pulls.get(item).await.map(|mut detail| {
+            detail.checks.sort_by_key(|check| match check.state {
+                CheckState::Failure => 0,
+                CheckState::Pending => 1,
+                CheckState::Success => 2,
+                CheckState::Neutral => 3,
+            });
+            detail
+        })
+    };
+    load(store, &format!("pull:{item}"), true, detail, &send).await;
+}
+
+/// How often a pull request on screen with running checks is looked at again.
+const CHECKS_RECHECK: Duration = Duration::from_secs(20);
+
+/// Looks at a pull request's detail again after a while, while its checks run.
+pub fn recheck_pull(
+    forge: Arc<dyn Forge>,
+    cache: Option<Arc<Cache>>,
+    item: ItemRef,
+    tx: mpsc::UnboundedSender<Action>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        tokio::time::sleep(CHECKS_RECHECK).await;
+        if let Some(pulls) = forge.pull_requests() {
+            let store = store_for(cache, forge.as_ref());
+            load_pull_detail(pulls, &store, &item, &tx).await;
+        }
+    })
+}
+
 /// A pull request's detail (cached, so reopening is instant) and its diff
 /// (highlighted off the UI thread).
 pub fn spawn_pull(
@@ -801,30 +851,10 @@ pub fn spawn_pull(
             return;
         };
         let store = store_for(cache, forge.as_ref());
-        let send = |result: Result<Loaded<PullRequestDetail>, ForgeError>| {
-            let _ = tx.send(Action::Data(DataEvent::PullDetail {
-                item: item.clone(),
-                result: result.map(|l| Loaded {
-                    value: Arc::new(l.value),
-                    fetched_at: l.fetched_at,
-                    fresh: l.fresh,
-                }),
-            }));
-        };
-        // What broke comes first, so it is one key away.
-        let detail = || async {
-            pulls.get(&item).await.map(|mut detail| {
-                detail.checks.sort_by_key(|check| match check.state {
-                    CheckState::Failure => 0,
-                    CheckState::Pending => 1,
-                    CheckState::Success => 2,
-                    CheckState::Neutral => 3,
-                });
-                detail
-            })
-        };
-        let key = format!("pull:{item}");
-        let (_, diff) = tokio::join!(load(&store, &key, true, detail, &send), pulls.diff(&item));
+        let (_, diff) = tokio::join!(
+            load_pull_detail(pulls, &store, &item, &tx),
+            pulls.diff(&item)
+        );
         let result = match diff {
             Ok(diff) => tokio::task::spawn_blocking(move || highlight_diff(diff, &theme))
                 .await

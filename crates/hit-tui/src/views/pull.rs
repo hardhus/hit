@@ -84,6 +84,8 @@ enum Pane {
 const PANES: [Pane; 3] = [Pane::Conversation, Pane::Files, Pane::Checks];
 
 pub struct PullView {
+    /// A later look at running checks.
+    recheck: Option<JoinHandle<()>>,
     account: AccountId,
     item: ItemRef,
     summary: Option<PullRequest>,
@@ -138,6 +140,7 @@ impl PullView {
             hunk: None,
             split: false,
             check: 0,
+            recheck: None,
         }
     }
 
@@ -792,6 +795,9 @@ impl Drop for PullView {
         if let Some(task) = self.task.take() {
             task.abort();
         }
+        if let Some(task) = self.recheck.take() {
+            task.abort();
+        }
     }
 }
 
@@ -904,6 +910,26 @@ impl View for PullView {
                     Ok(loaded) => {
                         self.detail = Some(loaded.clone());
                         self.detail_error = None;
+                        // Running checks finish on their own: keep looking.
+                        let running = loaded
+                            .value
+                            .checks
+                            .iter()
+                            .any(|check| check.state == CheckState::Pending);
+                        if let Some(task) = self.recheck.take() {
+                            task.abort();
+                        }
+                        if running
+                            && loaded.fresh
+                            && let Some(forge) = ctx.forges.by_account(&self.account)
+                        {
+                            self.recheck = Some(sync::recheck_pull(
+                                Arc::clone(forge),
+                                ctx.cache.clone(),
+                                self.item.clone(),
+                                ctx.sender(),
+                            ));
+                        }
                     }
                     Err(e) => self.detail_error = Some(e.clone()),
                 }
@@ -1153,6 +1179,47 @@ mod tests {
         buffer.content[2].set_symbol("a");
         crate::ui::scrub(&mut buffer);
         assert_eq!(cells(&buffer), "  a");
+    }
+
+    #[tokio::test]
+    async fn running_checks_are_looked_at_again_and_finished_ones_are_not() {
+        use hit_core::{Forge, model::CheckRun};
+
+        let forge = MockForge::demo(MockOptions::instant());
+        let account = forge.account().clone();
+        let repo = RepoRef::new(Host::new(hit_forge_mock::DEMO_HOST), "acme", "rocket");
+        let item = ItemRef::pull_request(repo, 142);
+        let mut detail = forge.pull_requests().unwrap().get(&item).await.unwrap();
+        let mut forges = Forges::new();
+        forges.add(Arc::new(forge));
+        let (ctx, _rx) = Ctx::for_tests(Services {
+            forges,
+            ..Services::default()
+        });
+        let mut view = PullView::new(account, item.clone(), None);
+        let mut deliver = |view: &mut PullView, checks: Vec<CheckRun>| {
+            detail.checks = checks;
+            view.update(
+                &Action::Data(DataEvent::PullDetail {
+                    item: item.clone(),
+                    result: Ok(crate::Loaded {
+                        value: Arc::new(detail.clone()),
+                        fetched_at: Timestamp::now(),
+                        fresh: true,
+                    }),
+                }),
+                &ctx,
+            );
+        };
+        let check = |state| CheckRun {
+            name: "test".to_owned(),
+            state,
+            url: None,
+        };
+        deliver(&mut view, vec![check(CheckState::Pending)]);
+        assert!(view.recheck.is_some());
+        deliver(&mut view, vec![check(CheckState::Failure)]);
+        assert!(view.recheck.is_none());
     }
 
     #[test]

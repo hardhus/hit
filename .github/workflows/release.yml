@@ -1,0 +1,141 @@
+# A release is a version merged to main that has no tag yet. Nothing is built
+# unless every check has passed on every system, and nothing is published unless
+# every build has.
+#
+# To try this without publishing, push to a branch named release-test/...: it
+# runs everything except the last job.
+
+name: Release
+
+on:
+  push:
+    branches: [main, 'release-test/**']
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    uses: ./.github/workflows/ci.yml
+
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.read.outputs.tag }}
+      released: ${{ steps.read.outputs.released }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: read
+        run: |
+          version=$(sed -n '/^\[workspace.package\]/,/^\[workspace.dep/s/^version = "\(.*\)"/\1/p' Cargo.toml)
+          if [ -z "$version" ]; then
+            echo "::error::could not read the version from Cargo.toml"
+            exit 1
+          fi
+          tag="v$version"
+          released=false
+          if git ls-remote --exit-code --tags "https://github.com/${GITHUB_REPOSITORY}" "refs/tags/$tag" > /dev/null; then
+            released=true
+            echo "$tag is already released: nothing to do"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "released=$released" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: [checks, version]
+    if: needs.version.outputs.released != 'true'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          # The oldest supported Ubuntu, so the binary runs on as many systems
+          # as possible: it needs a glibc at least as new as the one it was
+          # built with.
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, runs: true }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, runs: true }
+          - { os: macos-latest, target: aarch64-apple-darwin, runs: true }
+          - { os: macos-latest, target: x86_64-apple-darwin, runs: false }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Toolchain
+        shell: bash
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup target add "${{ matrix.target }}"
+      - name: Build
+        shell: bash
+        run: cargo build --release --locked -p hit-cli --target "${{ matrix.target }}"
+      - name: Package
+        shell: bash
+        env:
+          TAG: ${{ needs.version.outputs.tag }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          name="hit-$TAG-$TARGET"
+          mkdir -p "$name" dist
+          cp README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE "$name/"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cp "target/$TARGET/release/hit.exe" "$name/"
+            7z a "dist/$name.zip" "$name" > /dev/null
+          else
+            cp "target/$TARGET/release/hit" "$name/"
+            tar czf "dist/$name.tar.gz" "$name"
+          fi
+      - name: It starts and knows its version
+        if: matrix.runs
+        shell: bash
+        env:
+          TAG: ${{ needs.version.outputs.tag }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          out=$("hit-$TAG-$TARGET/hit" --version)
+          echo "$out"
+          [ "$out" = "hit ${TAG#v}" ]
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: hit-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    needs: [version, build]
+    if: github.ref == 'refs/heads/main' && needs.version.outputs.released != 'true'
+    runs-on: ubuntu-latest
+    # The only job allowed to write, and it runs no code from the repository.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum * > SHA256SUMS
+      - name: Notes from the changelog
+        env:
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          version="${TAG#v}"
+          awk -v v="[$version]" '
+            /^## / { if (found) exit; if (index($0, v)) { found = 1; next } }
+            found { print }
+          ' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then
+            echo "::error::CHANGELOG.md has no section for $version"
+            exit 1
+          fi
+      - name: Publish
+        env:
+          TAG: ${{ needs.version.outputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$TAG" dist/* --target "$GITHUB_SHA" --title "$TAG" --notes-file notes.md

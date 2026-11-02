@@ -610,7 +610,8 @@ async fn check(response: Response) -> Result<Response, ForgeError> {
     Err(map_error(status, &headers, message))
 }
 
-/// GitHub's reason: `message`, and for 422s the more useful first detail.
+/// GitHub's reason: for 422s the first detail says it all, `message` is only
+/// "Validation Failed" or the like.
 fn error_message(json: &serde_json::Value) -> Option<String> {
     let message = json.get("message")?.as_str()?;
     let detail = json
@@ -618,10 +619,7 @@ fn error_message(json: &serde_json::Value) -> Option<String> {
         .and_then(|errors| errors.get(0))
         .and_then(|first| first.get("message").or(Some(first)))
         .and_then(serde_json::Value::as_str);
-    Some(match detail {
-        Some(detail) => format!("{message}: {detail}"),
-        None => message.to_owned(),
-    })
+    Some(detail.unwrap_or(message).to_owned())
 }
 
 fn map_error(status: StatusCode, headers: &HeaderMap, message: String) -> ForgeError {

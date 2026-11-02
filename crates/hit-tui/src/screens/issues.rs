@@ -278,6 +278,8 @@ impl IssuesTab {
         let mut items: Vec<_> = self
             .loaded(ctx)
             .into_iter()
+            // GitHub's search can be behind; each item's own state is not.
+            .filter(|(_, issue)| self.current() == View::Closed || issue.is_open())
             .filter(|(_, issue)| {
                 self.labels.is_empty() || issue.labels.iter().any(|l| self.labels.contains(&l.name))
             })

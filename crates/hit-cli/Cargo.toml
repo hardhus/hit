@@ -1,6 +1,6 @@
 [package]
 name = "hit-cli"
-description = "A keyboard-driven terminal UI for GitHub and other forges"
+description = "A keyboard-driven terminal UI for GitHub (other forges planned)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -26,6 +26,8 @@ hit-github.workspace = true
 arboard.workspace = true
 open.workspace = true
 rpassword.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 hit-tui.workspace = true
 tokio.workspace = true
 tracing.workspace = true
