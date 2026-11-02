@@ -1,7 +1,7 @@
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
-use super::{CheckRun, CheckSummary, Comment, Label, Review, User};
+use super::{CheckRun, CheckSummary, Comment, Label, Review, ReviewThread, User};
 use crate::ItemRef;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -76,6 +76,11 @@ pub struct PullRequestDetail {
     /// Markdown description.
     pub body: String,
     pub comments: Vec<Comment>,
+    /// Comments before `comments`, which holds the latest ones.
+    #[serde(default)]
+    pub earlier_comments: u32,
     pub reviews: Vec<Review>,
+    #[serde(default)]
+    pub review_threads: Vec<ReviewThread>,
     pub checks: Vec<CheckRun>,
 }

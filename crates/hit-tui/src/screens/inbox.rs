@@ -10,7 +10,7 @@ use crossterm::event::KeyCode;
 use hit_config::MarkRead;
 use hit_core::{
     AccountId, ForgeError, ItemKind,
-    model::{Notification, NotificationId, NotificationReason, SubjectKind},
+    model::{Notification, NotificationId, NotificationReason, Subject, SubjectKind},
 };
 use ratatui::{
     Frame,
@@ -123,15 +123,29 @@ pub fn reason_style(reason: &NotificationReason, t: &Theme) -> (String, Color) {
     }
 }
 
-fn kind_icon(kind: &SubjectKind, t: &Theme) -> Span<'static> {
-    let (icon, color) = match kind {
+/// A check run's outcome is only in the notification's title.
+fn check_icon(title: &str, t: &Theme) -> (&'static str, Color) {
+    let title = title.to_lowercase();
+    if title.contains("fail") || title.contains("timed out") {
+        ("✗", t.danger)
+    } else if title.contains("succe") {
+        ("✓", t.success)
+    } else if title.contains("cancel") || title.contains("skip") {
+        ("·", t.muted)
+    } else {
+        ("◐", t.warning)
+    }
+}
+
+fn subject_icon(subject: &Subject, t: &Theme) -> Span<'static> {
+    let (icon, color) = match &subject.kind {
         SubjectKind::PullRequest => ("◈", t.success),
         SubjectKind::Issue => ("○", t.success),
         SubjectKind::Release => ("▲", t.accent_alt),
         SubjectKind::Commit => ("●", t.muted),
         SubjectKind::Discussion => ("◇", t.info),
-        SubjectKind::CheckSuite => ("✓", t.warning),
-        SubjectKind::Other(_) => ("!", t.danger),
+        SubjectKind::CheckSuite => check_icon(&subject.title, t),
+        SubjectKind::Other(_) => ("·", t.muted),
     };
     Span::styled(icon, bold(color))
 }
@@ -149,7 +163,7 @@ pub fn notification_lines(account: &AccountId, n: &Notification, ctx: &Ctx) -> V
     let muted = Style::new().fg(t.muted);
     let (reason, color) = reason_style(&n.reason, t);
     let mut header = vec![
-        kind_icon(&n.subject.kind, t),
+        subject_icon(&n.subject, t),
         Span::styled(format!(" {}", title_ref(n)), bold(t.accent)),
     ];
     if ctx.multi_account() {
@@ -253,7 +267,7 @@ impl InboxTab {
         } else {
             Span::styled("● ", bold(t.accent_alt))
         });
-        top.push(kind_icon(&n.subject.kind, t));
+        top.push(subject_icon(&n.subject, t));
         match &n.subject.item {
             Some(item) => top.extend(chips::item_ref(item, ctx)),
             None => {
@@ -559,6 +573,7 @@ impl Tab for InboxTab {
                             account,
                             item,
                             summary: None,
+                            checks_first: false,
                         },
                         ItemKind::Issue => Detail::Issue {
                             account,
@@ -972,6 +987,17 @@ mod tests {
 
     fn press(tab: &mut InboxTab, ctx: &Ctx, command: Command) -> Option<Action> {
         tab.command(command, ctx)
+    }
+
+    #[test]
+    fn a_check_notification_says_how_it_went() {
+        let t = Theme::jinx(true, true);
+        let icon = |title: &str| check_icon(title, &t).0;
+        assert_eq!(icon("CI workflow run failed for develop branch"), "✗");
+        assert_eq!(icon("Deploy workflow run, Attempt #5 failed for main"), "✗");
+        assert_eq!(icon("CI workflow run succeeded for main branch"), "✓");
+        assert_eq!(icon("CI workflow run cancelled for main branch"), "·");
+        assert_eq!(icon("CI workflow run"), "◐");
     }
 
     #[tokio::test]

@@ -140,6 +140,16 @@ impl PullView {
         }
     }
 
+    pub fn starting_on_checks(mut self, yes: bool) -> Self {
+        if yes {
+            self.pane = PANES
+                .iter()
+                .position(|pane| *pane == Pane::Checks)
+                .unwrap_or(0);
+        }
+        self
+    }
+
     fn pr(&self) -> Option<&PullRequest> {
         self.detail
             .as_ref()
@@ -216,7 +226,14 @@ impl PullView {
 
     fn render_conversation(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) {
         let lines = match &self.detail {
-            Some(d) => thread::lines(&d.value.body, &d.value.comments, &d.value.reviews, ctx),
+            Some(d) => thread::lines(
+                &d.value.body,
+                &d.value.comments,
+                d.value.earlier_comments,
+                &d.value.reviews,
+                &d.value.review_threads,
+                ctx,
+            ),
             None => thread::placeholder(self.detail_error.as_ref(), ctx),
         };
         let side = self.pr().map(|pr| pr_fields(pr, ctx));
@@ -909,10 +926,9 @@ impl View for PullView {
         let specs = [
             TabSpec {
                 title: "Conversation",
-                count: self
-                    .detail
-                    .as_ref()
-                    .map(|d| d.value.comments.len() + d.value.reviews.len()),
+                count: self.detail.as_ref().map(|d| {
+                    d.value.comments.len() + d.value.reviews.len() + d.value.review_threads.len()
+                }),
             },
             TabSpec {
                 title: "Files",
@@ -987,12 +1003,68 @@ impl PullView {
 
 #[cfg(test)]
 mod tests {
-    use hit_core::{Forges, Host, RepoRef};
+    use hit_core::{
+        Forges, Host, RepoRef, Timestamp,
+        model::{Comment, ReviewThread, User},
+    };
     use hit_forge_mock::{MockForge, MockOptions};
     use ratatui::{Terminal, backend::TestBackend};
 
     use super::*;
-    use crate::Services;
+    use crate::{Services, views::thread};
+
+    #[test]
+    fn line_comments_show_where_and_what_and_earlier_ones_are_mentioned() {
+        let (ctx, _rx) = Ctx::for_tests(Services::default());
+        let comment = Comment {
+            id: "1".to_owned(),
+            author: User::new("mira"),
+            body: "Cap the retries?".to_owned(),
+            created_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
+        };
+        let threads = [
+            ReviewThread {
+                path: "src/open.rs".to_owned(),
+                line: Some(41),
+                resolved: false,
+                outdated: true,
+                comments: vec![comment.clone()],
+            },
+            ReviewThread {
+                path: "src/done.rs".to_owned(),
+                line: None,
+                resolved: true,
+                outdated: false,
+                comments: vec![Comment {
+                    body: "hidden while resolved".to_owned(),
+                    ..comment.clone()
+                }],
+            },
+        ];
+        let text: String = thread::lines("", &[comment], 12, &[], &threads, &ctx)
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("1 open"), "{text}");
+        assert!(text.contains("src/open.rs:41  outdated"), "{text}");
+        assert!(text.contains("Cap the retries?"), "{text}");
+        assert!(text.contains("src/done.rs · resolved"), "{text}");
+        assert!(!text.contains("hidden while resolved"), "{text}");
+        assert!(text.contains("12 earlier comments"), "{text}");
+    }
+
+    #[test]
+    fn a_failing_pull_request_can_open_on_its_checks() {
+        let repo = RepoRef::new(Host::new("example.test"), "acme", "rocket");
+        let account = hit_core::AccountId::new(Host::new("example.test"), "someone");
+        let item = ItemRef::pull_request(repo, 1);
+        let view = PullView::new(account.clone(), item.clone(), None);
+        assert_eq!(view.pane(), Pane::Conversation);
+        let view = PullView::new(account, item, None).starting_on_checks(true);
+        assert_eq!(view.pane(), Pane::Checks);
+    }
 
     fn render(view: &mut PullView, ctx: &Ctx, width: u16) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, 40)).unwrap();

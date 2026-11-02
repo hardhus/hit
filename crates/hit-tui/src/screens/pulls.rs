@@ -24,7 +24,7 @@ use ratatui::{
 };
 use tokio::task::JoinHandle;
 
-use super::{JumpTarget, Tab, TabArea, focus::spinner, pr_fields};
+use super::{FocusAsks, JumpTarget, Tab, TabArea, focus::spinner, pr_fields};
 use crate::{
     Action, Ctx, DataEvent, Event,
     action::{Detail, Toast},
@@ -174,6 +174,7 @@ pub struct PullsTab {
     list_height: u16,
     /// Whether the rows are grouped, for the hint line.
     grouped: bool,
+    asks: FocusAsks,
 }
 
 impl Drop for PullsTab {
@@ -282,8 +283,8 @@ impl PullsTab {
         // Two accounts can see the same pull request; keep the one it asks
         // the most of.
         items.sort_by(|(a, x), (b, y)| {
-            Group::of(x, &a.login)
-                .cmp(&Group::of(y, &b.login))
+            self.group(a, x)
+                .cmp(&self.group(b, y))
                 .then_with(|| a.login.cmp(&b.login))
         });
         let mut seen = HashSet::new();
@@ -356,15 +357,15 @@ impl PullsTab {
             return items.into_iter().map(|(a, pr)| Slot::Item(a, pr)).collect();
         }
         // Stable: keeps the time order inside each group.
-        items.sort_by_key(|(account, pr)| Group::of(pr, &account.login));
+        items.sort_by_key(|(account, pr)| self.group(account, pr));
         let mut slots = Vec::with_capacity(items.len() + 4);
         let mut current = None;
         for (index, (account, pr)) in items.iter().enumerate() {
-            let group = Group::of(pr, &account.login);
+            let group = self.group(account, pr);
             if current != Some(group) {
                 let count = items[index..]
                     .iter()
-                    .take_while(|(a, p)| Group::of(p, &a.login) == group)
+                    .take_while(|(a, p)| self.group(a, p) == group)
                     .count();
                 slots.push(Slot::Header(group, count));
                 current = Some(group);
@@ -387,9 +388,21 @@ impl PullsTab {
 
     /// What this pull request asks of the user, shown in a repository's
     /// first view where everyone's pull requests are mixed.
+    fn group(&self, account: &AccountId, pr: &PullRequest) -> Group {
+        if self.asks.reasons(account, &pr.reference).is_empty() {
+            Group::of(pr, &account.login)
+        } else {
+            Group::NeedsYou
+        }
+    }
+
     fn reasons(&self, account: &AccountId, pr: &PullRequest, ctx: &Ctx) -> Vec<FocusReason> {
         if self.is_grouped(ctx) {
-            focus::pr_reasons(pr, &account.login, false)
+            let mut reasons = focus::pr_reasons(pr, &account.login, false);
+            reasons.extend_from_slice(self.asks.reasons(account, &pr.reference));
+            reasons.sort();
+            reasons.dedup();
+            reasons
         } else {
             Vec::new()
         }
@@ -573,6 +586,7 @@ impl Tab for PullsTab {
     }
 
     fn scope_changed(&mut self, ctx: &Ctx) {
+        self.asks = FocusAsks::default();
         self.data.clear();
         self.view = 0;
         self.filter.clear();
@@ -610,10 +624,13 @@ impl Tab for PullsTab {
             Command::PrevGroup => self.list.jump_group(false, &rows),
             Command::Open => {
                 let (account, pr) = self.selected_pr(ctx)?;
+                let checks_first =
+                    self.reasons(&account, &pr, ctx).first() == Some(&FocusReason::ChecksFailing);
                 return Some(Action::ShowDetail(Detail::Pull {
                     account,
                     item: pr.reference.clone(),
                     summary: Some(Box::new(pr)),
+                    checks_first,
                 }));
             }
             Command::Browser => {
@@ -679,6 +696,7 @@ impl Tab for PullsTab {
     }
 
     fn update(&mut self, action: &Action, ctx: &Ctx) {
+        self.asks.update(action, ctx);
         if let Action::Data(DataEvent::PullsMore {
             account,
             scope,
@@ -1053,6 +1071,40 @@ mod tests {
         tab.activated(&ctx);
         rx.recv().await.unwrap();
         assert_eq!(forge.calls().pulls, 2);
+    }
+
+    #[tokio::test]
+    async fn what_action_required_says_counts_here_too() {
+        let (mut tab, ctx, _rx) = in_repo().await;
+        let account = ctx.forges.iter().next().unwrap().account().clone();
+        let visible = tab.visible(&ctx);
+        let (_, other) = visible
+            .iter()
+            .find(|(a, pr)| tab.group(a, pr) == Group::Others)
+            .unwrap();
+        let pr = (*other).clone();
+        drop(visible);
+
+        let item = hit_core::focus::FocusItem {
+            subject: hit_core::focus::FocusSubject::PullRequest(pr.clone()),
+            reasons: vec![FocusReason::Mentioned],
+            updated_at: pr.updated_at,
+        };
+        tab.update(
+            &Action::Data(DataEvent::Focus {
+                account: account.clone(),
+                scope: ctx.scope.clone(),
+                result: Ok(Loaded {
+                    value: Arc::new(vec![item]),
+                    fetched_at: hit_core::Timestamp::now(),
+                    fresh: true,
+                }),
+            }),
+            &ctx,
+        );
+
+        assert_eq!(tab.group(&account, &pr), Group::NeedsYou);
+        assert_eq!(tab.reasons(&account, &pr, &ctx), [FocusReason::Mentioned]);
     }
 
     #[tokio::test]

@@ -116,17 +116,37 @@ impl NotificationJson {
                 Some(ItemRef::issue(repo.clone(), n)),
                 format!("{}{repo}/issues/{n}", host.web()),
             ),
-            (kind, _) => (
+            (kind, number) => {
+                let page = |path: String| format!("{}{repo}/{path}", host.web());
+                let last = self
+                    .subject
+                    .url
+                    .as_deref()
+                    .and_then(|url| url.rsplit('/').next())
+                    .unwrap_or_default();
                 match kind {
-                    "Release" => SubjectKind::Release,
-                    "Commit" => SubjectKind::Commit,
-                    "Discussion" => SubjectKind::Discussion,
-                    "CheckSuite" => SubjectKind::CheckSuite,
-                    other => SubjectKind::Other(other.to_owned()),
-                },
-                None,
-                self.repository.html_url.clone(),
-            ),
+                    // The API address has an id, not the tag the page needs.
+                    "Release" => (SubjectKind::Release, None, page("releases".to_owned())),
+                    "Commit" if !last.is_empty() && last.chars().all(|c| c.is_ascii_hexdigit()) => {
+                        (SubjectKind::Commit, None, page(format!("commit/{last}")))
+                    }
+                    "Commit" => (SubjectKind::Commit, None, page("commits".to_owned())),
+                    "Discussion" => (
+                        SubjectKind::Discussion,
+                        None,
+                        page(
+                            number.map_or("discussions".to_owned(), |n| format!("discussions/{n}")),
+                        ),
+                    ),
+                    // GitHub does not say which run; its list is one click from it.
+                    "CheckSuite" => (SubjectKind::CheckSuite, None, page("actions".to_owned())),
+                    other => (
+                        SubjectKind::Other(other.to_owned()),
+                        None,
+                        self.repository.html_url.clone(),
+                    ),
+                }
+            }
         };
         Notification {
             id: NotificationId(self.id),

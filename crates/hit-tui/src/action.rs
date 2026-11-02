@@ -146,6 +146,8 @@ pub enum Detail {
         account: AccountId,
         item: ItemRef,
         summary: Option<Box<PullRequest>>,
+        /// Failing checks are what it is about: open on them.
+        checks_first: bool,
     },
     /// An issue; `summary` (if known) shows while the detail loads.
     Issue {

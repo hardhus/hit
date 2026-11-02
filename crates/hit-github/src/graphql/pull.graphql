@@ -3,11 +3,23 @@ query Pull($owner: String!, $name: String!, $number: Int!) {
     pullRequest(number: $number) {
       ...Pr
       body
-      thread: comments(first: 50) {
+      thread: comments(last: 50) {
+        totalCount
         nodes { id body createdAt updatedAt author { __typename login } }
       }
       reviews(last: 30) {
         nodes { state body submittedAt author { __typename login } }
+      }
+      reviewThreads(last: 50) {
+        nodes {
+          path
+          line
+          isResolved
+          isOutdated
+          comments(first: 20) {
+            nodes { id body createdAt updatedAt author { __typename login } }
+          }
+        }
       }
       checks: commits(last: 1) {
         nodes {

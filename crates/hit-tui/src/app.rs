@@ -233,11 +233,11 @@ impl App {
                         account,
                         item,
                         summary,
-                    } => Box::new(PullView::new(
-                        account.clone(),
-                        item.clone(),
-                        summary.as_deref().cloned(),
-                    )),
+                        checks_first,
+                    } => Box::new(
+                        PullView::new(account.clone(), item.clone(), summary.as_deref().cloned())
+                            .starting_on_checks(*checks_first),
+                    ),
                 };
                 self.push(view);
                 return;

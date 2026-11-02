@@ -46,4 +46,7 @@ pub struct IssueDetail {
     /// Markdown description.
     pub body: String,
     pub comments: Vec<Comment>,
+    /// Comments before `comments`, which holds the latest ones.
+    #[serde(default)]
+    pub earlier_comments: u32,
 }

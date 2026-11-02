@@ -7,8 +7,8 @@ use hit_core::{
     Host, ItemRef, RepoRef, Timestamp,
     model::{
         CheckRun, CheckState, CheckSummary, CloseReason, Comment, Issue, IssueState, Label,
-        Mergeable, PrState, PullRequest, RepoCounts, Review, ReviewDecision, ReviewState, Rgb,
-        User,
+        Mergeable, PrState, PullRequest, RepoCounts, Review, ReviewDecision, ReviewState,
+        ReviewThread, Rgb, User,
     },
 };
 use serde::Deserialize;
@@ -525,13 +525,60 @@ pub(crate) fn check_runs(connection: Option<Nodes<ContextsWrap>>) -> Vec<CheckRu
         .collect()
 }
 
+/// The latest comments of a conversation and how many there are in all.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Thread {
+    #[serde(default)]
+    total_count: u32,
+    #[serde(flatten)]
+    comments: Nodes<CommentNode>,
+}
+
+/// The comments we have, and how many came before them.
+pub(crate) fn thread(thread: Option<Thread>) -> (Vec<Comment>, u32) {
+    let Some(thread) = thread else {
+        return (Vec::new(), 0);
+    };
+    let total = thread.total_count;
+    let shown = comments(Some(thread.comments));
+    let earlier = total.saturating_sub(u32::try_from(shown.len()).unwrap_or(u32::MAX));
+    (shown, earlier)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ReviewThreadNode {
+    path: String,
+    line: Option<u32>,
+    #[serde(default)]
+    is_resolved: bool,
+    #[serde(default)]
+    is_outdated: bool,
+    comments: Option<Nodes<CommentNode>>,
+}
+
+pub(crate) fn review_threads(threads: Option<Nodes<ReviewThreadNode>>) -> Vec<ReviewThread> {
+    nodes(threads)
+        .map(|node| ReviewThread {
+            path: node.path,
+            line: node.line,
+            resolved: node.is_resolved,
+            outdated: node.is_outdated,
+            comments: comments(node.comments),
+        })
+        .collect()
+}
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct PullDetailNode {
     #[serde(flatten)]
     pub pr: PrNode,
     pub body: String,
-    pub thread: Option<Nodes<CommentNode>>,
+    pub thread: Option<Thread>,
     pub reviews: Option<Nodes<ReviewNode>>,
+    #[serde(rename = "reviewThreads")]
+    pub review_threads: Option<Nodes<ReviewThreadNode>>,
     pub checks: Option<Nodes<ContextsWrap>>,
 }
 
@@ -551,7 +598,7 @@ pub(crate) struct IssueDetailNode {
     #[serde(flatten)]
     pub issue: IssueNode,
     pub body: String,
-    pub thread: Option<Nodes<CommentNode>>,
+    pub thread: Option<Thread>,
 }
 
 #[derive(Debug, Deserialize)]

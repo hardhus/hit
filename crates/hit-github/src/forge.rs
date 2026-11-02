@@ -278,11 +278,14 @@ impl PullRequests for GithubForge {
             .repository
             .and_then(|r| r.pull_request)
             .ok_or(ForgeError::NotFound)?;
+        let (comments, earlier_comments) = nodes::thread(node.thread);
         Ok(PullRequestDetail {
             pr: node.pr.into_model(self.host()),
             body: node.body,
-            comments: nodes::comments(node.thread),
+            comments,
+            earlier_comments,
             reviews: nodes::reviews(node.reviews),
+            review_threads: nodes::review_threads(node.review_threads),
             checks: nodes::check_runs(node.checks),
         })
     }
@@ -349,10 +352,12 @@ impl Issues for GithubForge {
             .repository
             .and_then(|r| r.issue)
             .ok_or(ForgeError::NotFound)?;
+        let (comments, earlier_comments) = nodes::thread(node.thread);
         Ok(IssueDetail {
             issue: node.issue.into_model(self.host()),
             body: node.body,
-            comments: nodes::comments(node.thread),
+            comments,
+            earlier_comments,
         })
     }
 }

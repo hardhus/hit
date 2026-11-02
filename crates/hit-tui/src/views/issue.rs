@@ -223,7 +223,14 @@ impl View for IssueView {
             ..body
         };
         let lines = match &self.detail {
-            Some(d) => thread::lines(&d.value.body, &d.value.comments, &[], ctx),
+            Some(d) => thread::lines(
+                &d.value.body,
+                &d.value.comments,
+                d.value.earlier_comments,
+                &[],
+                &[],
+                ctx,
+            ),
             None => thread::placeholder(self.error.as_ref(), ctx),
         };
         let side = self.issue().map(|i| issue_fields(i, ctx));
