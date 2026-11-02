@@ -539,13 +539,20 @@ impl IssuesTab {
                 spans.push(Span::styled("▏", bold(t.accent_alt)));
             }
         }
-        frame.render_widget(Paragraph::new(Line::from(spans)), area);
+        let count = self.count_text(shown, ctx);
+        let room = area
+            .width
+            .saturating_sub(u16::try_from(count.chars().count()).unwrap_or(0));
         frame.render_widget(
-            Paragraph::new(Span::styled(
-                self.count_text(shown, ctx),
-                Style::new().fg(t.muted),
-            ))
-            .alignment(Alignment::Right),
+            Paragraph::new(Line::from(spans)),
+            Rect {
+                width: room,
+                ..area
+            },
+        );
+        frame.render_widget(
+            Paragraph::new(Span::styled(count, Style::new().fg(t.muted)))
+                .alignment(Alignment::Right),
             area,
         );
     }
