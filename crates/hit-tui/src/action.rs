@@ -67,6 +67,35 @@ pub enum Action {
     ConfigChanged(ConfigChange),
 }
 
+impl Action {
+    /// For the log. Never the contents: comments, notification titles and
+    /// private repositories' data do not belong in a plain text file.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Quit => "quit",
+            Self::Back => "back",
+            Self::Redraw => "redraw",
+            Self::Data(_) => "data",
+            Self::OpenLogin => "open_login",
+            Self::AccountAdded(_) => "account_added",
+            Self::CycleAccount => "cycle_account",
+            Self::SetScope(_) => "set_scope",
+            Self::ShowDetail(_) => "show_detail",
+            Self::Toast(_) => "toast",
+            Self::Run(_) => "run",
+            Self::OpenSettings => "open_settings",
+            Self::OpenActions(..) => "open_actions",
+            Self::Compose(..) => "compose",
+            Self::OpenMerge(_) => "open_merge",
+            Self::Perform(..) => "perform",
+            Self::CloseCompose { .. } => "close_compose",
+            Self::EditInEditor(_) => "edit_in_editor",
+            Self::EditorDone(_) => "editor_done",
+            Self::ConfigChanged(_) => "config_changed",
+        }
+    }
+}
+
 /// What a text box is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Purpose {
