@@ -86,7 +86,7 @@ fn issue_json(repo: &str, number: u64, author: &str) -> Value {
         "number": number,
         "title": format!("Issue {number}"),
         "url": format!("https://github.com/{repo}/issues/{number}"),
-        "state": "OPEN",
+        "issueState": "OPEN",
         "stateReason": null,
         "createdAt": "2026-10-01T10:00:00Z",
         "updatedAt": format!("2026-10-2{}T10:00:00Z", number % 10),

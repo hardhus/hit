@@ -37,6 +37,10 @@ msrv:
 bump version:
     sh scripts/bump.sh {{version}}
 
+# check GraphQL queries against GitHub's public schema (needs curl and node)
+graphql:
+    sh scripts/graphql.sh
+
 # check dependencies for known vulnerabilities (needs cargo-audit)
 audit:
     sh scripts/audit.sh
