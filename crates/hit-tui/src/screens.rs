@@ -104,6 +104,12 @@ pub trait Tab {
     /// The tab became visible (for entrance animations).
     fn shown(&mut self) {}
 
+    /// The user came to this tab: the time to load what only it needs, or to
+    /// catch up if what it has is old.
+    fn activated(&mut self, ctx: &Ctx) {
+        let _ = ctx;
+    }
+
     /// The tab is no longer visible.
     fn hidden(&mut self, ctx: &Ctx) {
         let _ = ctx;

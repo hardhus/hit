@@ -650,6 +650,17 @@ impl Tab for IssuesTab {
         }
     }
 
+    fn activated(&mut self, ctx: &Ctx) {
+        let oldest = self
+            .shown_data(ctx)
+            .filter_map(|(_, data)| data.items.as_ref())
+            .map(|loaded| loaded.fetched_at)
+            .min();
+        if oldest.is_some_and(|at| sync::is_stale(at, ctx.prefs.refresh.focus_minutes)) {
+            self.mount(ctx);
+        }
+    }
+
     fn scope_changed(&mut self, ctx: &Ctx) {
         self.data.clear();
         self.view = 0;

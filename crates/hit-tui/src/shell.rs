@@ -87,6 +87,7 @@ impl Shell {
         self.active = index;
         if let Some(tab) = self.tabs.get_mut(index) {
             tab.shown();
+            tab.activated(ctx);
         }
         if let Some(&(x, w)) = self.positions.get(index) {
             let duration = if ctx.animations {
@@ -647,6 +648,47 @@ mod tests {
 
     fn key(code: KeyCode) -> Event {
         Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    #[tokio::test]
+    async fn starting_asks_only_for_what_is_needed() {
+        let forge = Arc::new(MockForge::demo(MockOptions::instant()));
+        let mut forges = Forges::new();
+        forges.add(Arc::clone(&forge) as Arc<dyn hit_core::Forge>);
+        let (ctx, mut rx) = Ctx::for_tests(Services {
+            forges,
+            ..Services::default()
+        });
+        let mut shell = Shell::new(Vec::new());
+        shell.mount(&ctx);
+        let mut waiting = ["focus", "inbox", "pulls"].to_vec();
+        while !waiting.is_empty() {
+            let action = rx.recv().await.unwrap();
+            let done = match &action {
+                Action::Data(crate::DataEvent::Focus { .. }) => "focus",
+                Action::Data(crate::DataEvent::Notifications { .. }) => "inbox",
+                Action::Data(crate::DataEvent::Pulls { .. }) => "pulls",
+                _ => "",
+            };
+            waiting.retain(|w| *w != done);
+            shell.update(&action, &ctx);
+        }
+
+        let calls = forge.calls();
+        assert_eq!(calls.notifications, 1, "one notifications loop");
+        assert_eq!(calls.pulls, 1, "one view");
+        assert_eq!(calls.repos, 0, "Repos waits until it is opened");
+
+        // Opening it asks once; coming back does not ask again.
+        shell.switch(REPOS_TAB, &ctx);
+        while !matches!(
+            rx.recv().await.unwrap(),
+            Action::Data(crate::DataEvent::Repos { .. })
+        ) {}
+        shell.switch(0, &ctx);
+        shell.switch(REPOS_TAB, &ctx);
+        tokio::task::yield_now().await;
+        assert_eq!(forge.calls().repos, 1);
     }
 
     struct Rejected {

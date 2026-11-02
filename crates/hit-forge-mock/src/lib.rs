@@ -64,11 +64,20 @@ impl MockOptions {
     }
 }
 
+/// How many times each kind of list was asked for.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Calls {
+    pub notifications: usize,
+    pub pulls: usize,
+    pub repos: usize,
+}
+
 pub struct MockForge {
     account: AccountId,
     options: MockOptions,
     rng: Mutex<Lcg>,
     data: Mutex<Data>,
+    calls: Mutex<Calls>,
 }
 
 impl MockForge {
@@ -79,7 +88,17 @@ impl MockForge {
             rng: Mutex::new(Lcg::new(options.seed)),
             options,
             data: Mutex::new(Data::demo(&host)),
+            calls: Mutex::default(),
         }
+    }
+
+    /// What has been asked for so far, to catch needless requests in tests.
+    pub fn calls(&self) -> Calls {
+        *self.lock_calls()
+    }
+
+    fn lock_calls(&self) -> MutexGuard<'_, Calls> {
+        self.calls.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn data(&self) -> MutexGuard<'_, Data> {
@@ -150,6 +169,7 @@ impl Forge for MockForge {
 #[async_trait]
 impl PullRequests for MockForge {
     async fn list(&self, query: &PrQuery, page: &PageRequest) -> Result<Page<PullRequest>> {
+        self.lock_calls().pulls += 1;
         self.network().await?;
         let mut items: Vec<PullRequest> = self
             .data()
@@ -262,6 +282,7 @@ impl Notifications for MockForge {
         query: &NotificationQuery,
         page: &PageRequest,
     ) -> Result<Page<Notification>> {
+        self.lock_calls().notifications += 1;
         self.network().await?;
         let mut items: Vec<Notification> = self
             .data()
@@ -346,6 +367,7 @@ impl Repositories for MockForge {
     }
 
     async fn list_mine(&self, page: &PageRequest) -> Result<Page<Repo>> {
+        self.lock_calls().repos += 1;
         self.network().await?;
         let mut repos: Vec<Repo> = {
             let data = self.data();
