@@ -112,6 +112,105 @@ fn body(request: &Request) -> Value {
 }
 
 #[tokio::test]
+async fn repositories_come_from_rest_without_counts() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/user/repos"))
+        .and(query_param("sort", "pushed"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([{
+            "name": "widget",
+            "owner": { "login": "acme" },
+            "description": null,
+            "private": true,
+            "default_branch": "trunk",
+            "html_url": "https://github.com/acme/widget",
+            "pushed_at": "2026-01-02T03:04:05Z"
+        }])))
+        .mount(&server)
+        .await;
+
+    let page = Repositories::list_mine(&default_forge(&server), &PageRequest::first(100))
+        .await
+        .unwrap();
+    let [repo] = page.items.as_slice() else {
+        panic!("expected one repository");
+    };
+    assert_eq!(repo.reference.to_string(), "acme/widget");
+    assert!(repo.private);
+    assert_eq!(repo.default_branch.as_deref(), Some("trunk"));
+    assert_eq!((repo.open_prs, repo.open_issues), (None, None));
+}
+
+#[tokio::test]
+async fn open_counts_come_page_by_page() {
+    let server = MockServer::start().await;
+    graphql_reply(
+        &server,
+        json!({ "viewer": { "repositories": {
+            "pageInfo": { "hasNextPage": true, "endCursor": "abc" },
+            "nodes": [null, {
+                "name": "widget",
+                "owner": { "login": "acme" },
+                "pullRequests": { "totalCount": 3 },
+                "issues": { "totalCount": 7 }
+            }]
+        }}}),
+    )
+    .await;
+
+    let page = Repositories::open_counts(&default_forge(&server), &PageRequest::first(25))
+        .await
+        .unwrap();
+    assert_eq!(page.next, Some(Cursor("abc".to_owned())));
+    let [counts] = page.items.as_slice() else {
+        panic!("expected one repository");
+    };
+    assert_eq!(counts.reference.to_string(), "acme/widget");
+    assert_eq!((counts.open_prs, counts.open_issues), (3, 7));
+}
+
+#[tokio::test]
+async fn open_counts_retry_with_a_smaller_page_after_a_502() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/graphql"))
+        .and(|request: &Request| body(request)["variables"]["first"] == 25)
+        .respond_with(ResponseTemplate::new(502))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/graphql"))
+        .and(|request: &Request| body(request)["variables"]["first"] == 10)
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": {
+            "viewer": { "repositories": { "nodes": [] } }
+        }})))
+        .mount(&server)
+        .await;
+
+    let page = Repositories::open_counts(&default_forge(&server), &PageRequest::first(25))
+        .await
+        .unwrap();
+    assert!(page.items.is_empty());
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn a_lasting_502_says_the_server_is_in_trouble() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/graphql"))
+        .respond_with(ResponseTemplate::new(502))
+        .mount(&server)
+        .await;
+
+    let error = Repositories::open_counts(&default_forge(&server), &PageRequest::first(25))
+        .await
+        .unwrap_err();
+    assert_eq!(error, ForgeError::Unavailable("502 Bad Gateway".to_owned()));
+    assert!(error.is_retryable());
+}
+
+#[tokio::test]
 async fn focus_merges_categories() {
     let server = MockServer::start().await;
     let review = pr_json("acme/rocket", 1, "mira", json!({}));

@@ -1,13 +1,19 @@
 //! Pull requests: ready-made views (involved, mine, review, closed) across
-//! all shown accounts.
+//! all shown accounts. Inside a repository the first view is everything open
+//! in it, most urgent first (audit D-045).
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
 
 use crossterm::event::KeyCode;
 use hit_core::{
     AccountId, ForgeError, ItemRef,
+    focus::{self, FocusReason},
     model::{CheckState, PrState, PullRequest, ReviewDecision},
-    query::{PrQuery, StateFilter},
+    query::{PrQuery, Scope, StateFilter},
 };
 use ratatui::{
     Frame,
@@ -56,8 +62,9 @@ impl View {
         }
     }
 
-    fn title(self) -> &'static str {
+    fn title(self, in_repo: bool) -> &'static str {
         match self {
+            Self::Involved if in_repo => "all open",
             Self::Involved => "involved",
             Self::Mine => "mine",
             Self::Review => "review requested",
@@ -75,6 +82,71 @@ impl View {
         }
         query
     }
+
+    /// What to fetch. A repository's first view also asks for what concerns
+    /// the user directly, so it cannot fall off the end of a busy repository.
+    /// Those come first: the review search's copy is the one that knows about
+    /// requests to the user's teams.
+    fn queries(self, me: &str, scope: &Scope) -> Vec<PrQuery> {
+        let scoped = |mut query: PrQuery| {
+            query.scope = scope.clone();
+            query
+        };
+        let mut queries = Vec::new();
+        if self == Self::Involved && scope.repo().is_some() {
+            queries.push(scoped(Self::Review.query(me)));
+            queries.push(scoped(Self::Mine.query(me)));
+        }
+        queries.push(scoped(self.query(me)));
+        queries
+    }
+}
+
+/// Groups of a repository's first view, most urgent first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Group {
+    NeedsYou,
+    Yours,
+    Others,
+    Drafts,
+}
+
+impl Group {
+    fn of(pr: &PullRequest, me: &str) -> Self {
+        if !focus::pr_reasons(pr, me, false).is_empty() {
+            Self::NeedsYou
+        } else if pr.author.login == me {
+            Self::Yours
+        } else if pr.is_draft() {
+            Self::Drafts
+        } else {
+            Self::Others
+        }
+    }
+
+    fn title(self) -> &'static str {
+        match self {
+            Self::NeedsYou => "Needs you",
+            Self::Yours => "Your pull requests",
+            Self::Others => "Everything else",
+            Self::Drafts => "Drafts",
+        }
+    }
+
+    fn color(self, ctx: &Ctx) -> ratatui::style::Color {
+        match self {
+            Self::NeedsYou => ctx.theme.accent_alt,
+            Self::Yours => ctx.theme.accent,
+            Self::Others => ctx.theme.info,
+            Self::Drafts => ctx.theme.muted,
+        }
+    }
+}
+
+/// A list position: a group header or a pull request.
+enum Slot<'a> {
+    Header(Group, usize),
+    Item(&'a AccountId, &'a PullRequest),
 }
 
 #[derive(Default)]
@@ -97,6 +169,8 @@ pub struct PullsTab {
     cursor: Option<Tween>,
     appeared: Option<Moment>,
     list_height: u16,
+    /// Whether the rows are grouped, for the hint line.
+    grouped: bool,
 }
 
 impl Drop for PullsTab {
@@ -202,44 +276,110 @@ impl PullsTab {
                     || pr.author.login.to_lowercase().contains(&needle)
             })
             .collect();
+        // Two accounts can see the same pull request; keep the one it asks
+        // the most of.
+        items.sort_by(|(a, x), (b, y)| {
+            Group::of(x, &a.login)
+                .cmp(&Group::of(y, &b.login))
+                .then_with(|| a.login.cmp(&b.login))
+        });
+        let mut seen = HashSet::new();
+        items.retain(|(_, pr)| seen.insert(&pr.reference));
         items.sort_by_key(|(_, pr)| std::cmp::Reverse(pr.updated_at));
         items
     }
 
-    fn rows(&self, ctx: &Ctx) -> Vec<Row> {
+    fn is_grouped(&self, ctx: &Ctx) -> bool {
+        ctx.scope.repo().is_some() && self.current() == View::Involved
+    }
+
+    /// The list: flat, or under group headers in a repository's first view.
+    fn slots<'a>(&'a self, ctx: &'a Ctx) -> Vec<Slot<'a>> {
+        let mut items = self.visible(ctx);
+        if !self.is_grouped(ctx) {
+            return items.into_iter().map(|(a, pr)| Slot::Item(a, pr)).collect();
+        }
+        // Stable: keeps the time order inside each group.
+        items.sort_by_key(|(account, pr)| Group::of(pr, &account.login));
+        let mut slots = Vec::with_capacity(items.len() + 4);
+        let mut current = None;
+        for (index, (account, pr)) in items.iter().enumerate() {
+            let group = Group::of(pr, &account.login);
+            if current != Some(group) {
+                let count = items[index..]
+                    .iter()
+                    .take_while(|(a, p)| Group::of(p, &a.login) == group)
+                    .count();
+                slots.push(Slot::Header(group, count));
+                current = Some(group);
+            }
+            slots.push(Slot::Item(account, pr));
+        }
+        slots
+    }
+
+    fn header(group: Group, count: usize, ctx: &Ctx) -> Row {
         let t = &ctx.theme;
-        self.visible(ctx)
+        let color = group.color(ctx);
+        Row::Header(Line::from(vec![
+            Span::styled("▸ ", bold(color)),
+            Span::styled(group.title(), bold(color)),
+            Span::styled(format!("  {count} "), Style::new().fg(t.muted)),
+            Span::styled("─".repeat(200), Style::new().fg(t.border)),
+        ]))
+    }
+
+    /// What this pull request asks of the user, shown in a repository's
+    /// first view where everyone's pull requests are mixed.
+    fn reasons(&self, account: &AccountId, pr: &PullRequest, ctx: &Ctx) -> Vec<FocusReason> {
+        if self.is_grouped(ctx) {
+            focus::pr_reasons(pr, &account.login, false)
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn row(&self, account: &AccountId, pr: &PullRequest, ctx: &Ctx) -> Row {
+        let t = &ctx.theme;
+        let mut top = Vec::new();
+        if let Some(badge) = chips::account_badge(account, ctx) {
+            top.push(badge);
+        }
+        top.push(pr_icon(pr, ctx));
+        top.extend(chips::item_ref(&pr.reference, ctx));
+        top.push(Span::styled(pr.title.clone(), bold(t.fg)));
+        let reasons = self.reasons(account, pr, ctx);
+        let accent = match pr.checks.map(|c| c.state) {
+            _ if !reasons.is_empty() => chips::reasons_color(&reasons, t),
+            Some(CheckState::Failure) => t.danger,
+            _ if pr.review_decision == Some(ReviewDecision::ChangesRequested) => t.warning,
+            _ if pr.review_decision == Some(ReviewDecision::Approved) => t.success,
+            _ => t.accent,
+        };
+        let mut bottom = Vec::new();
+        for reason in reasons {
+            bottom.push(chips::reason_span(reason, t));
+            bottom.push(Span::styled(" · ", Style::new().fg(t.border)));
+        }
+        bottom.extend(pr_status_spans(pr, ctx));
+        Row::item(Line::from(top), Line::from(bottom), accent)
+    }
+
+    fn rows(&self, ctx: &Ctx) -> Vec<Row> {
+        self.slots(ctx)
             .into_iter()
-            .map(|(account, pr)| {
-                let mut top = Vec::new();
-                if let Some(badge) = chips::account_badge(account, ctx) {
-                    top.push(badge);
-                }
-                top.push(pr_icon(pr, ctx));
-                top.push(Span::styled(
-                    format!(" {} ", pr.reference),
-                    Style::new().fg(t.muted),
-                ));
-                top.push(Span::styled(pr.title.clone(), bold(t.fg)));
-                let accent = match pr.checks.map(|c| c.state) {
-                    Some(CheckState::Failure) => t.danger,
-                    _ if pr.review_decision == Some(ReviewDecision::ChangesRequested) => t.warning,
-                    _ if pr.review_decision == Some(ReviewDecision::Approved) => t.success,
-                    _ => t.accent,
-                };
-                Row::item(
-                    Line::from(top),
-                    Line::from(pr_status_spans(pr, ctx)),
-                    accent,
-                )
+            .map(|slot| match slot {
+                Slot::Header(group, count) => Self::header(group, count, ctx),
+                Slot::Item(account, pr) => self.row(account, pr, ctx),
             })
             .collect()
     }
 
     fn selected_pr(&self, ctx: &Ctx) -> Option<(AccountId, PullRequest)> {
-        self.visible(ctx)
-            .get(self.list.selected)
-            .map(|(a, pr)| ((*a).clone(), (*pr).clone()))
+        match self.slots(ctx).get(self.list.selected) {
+            Some(Slot::Item(account, pr)) => Some(((*account).clone(), (*pr).clone())),
+            _ => None,
+        }
     }
 
     fn remember_selection(&mut self, ctx: &Ctx) {
@@ -252,17 +392,17 @@ impl PullsTab {
         let Some((account, item)) = &self.selected else {
             return;
         };
-        if let Some(index) = self
-            .visible(ctx)
-            .iter()
-            .position(|(a, pr)| *a == account && &pr.reference == item)
-        {
+        let found = self.slots(ctx).iter().position(
+            |slot| matches!(slot, Slot::Item(a, pr) if *a == account && &pr.reference == item),
+        );
+        if let Some(index) = found {
             self.list.selected = index;
         }
     }
 
     fn render_bar(&self, frame: &mut Frame, area: Rect, shown: usize, ctx: &Ctx) {
         let t = &ctx.theme;
+        let in_repo = ctx.scope.repo().is_some();
         let mut spans = vec![Span::raw(" ")];
         for (index, view) in VIEWS.iter().enumerate() {
             if index > 0 {
@@ -270,11 +410,11 @@ impl PullsTab {
             }
             if index == self.view {
                 spans.push(Span::styled(
-                    format!("◆ {}", view.title()),
+                    format!("◆ {}", view.title(in_repo)),
                     bold(t.accent_alt),
                 ));
             } else {
-                spans.push(Span::styled(view.title(), Style::new().fg(t.muted)));
+                spans.push(Span::styled(view.title(in_repo), Style::new().fg(t.muted)));
             }
         }
         if self.editing || !self.filter.is_empty() {
@@ -348,20 +488,33 @@ impl Tab for PullsTab {
     fn mount(&mut self, ctx: &Ctx) {
         self.stop();
         let view = self.current();
-        for forge in ctx.forges.iter() {
+        self.grouped = self.is_grouped(ctx);
+        for forge in ctx.scoped_forges() {
             let account = forge.account().clone();
             self.data.entry((account.clone(), view.key())).or_default();
             self.tasks.push(sync::spawn_pulls(
                 Arc::clone(forge),
                 ctx.cache.clone(),
                 view.key(),
-                view.query(&account.login),
+                view.queries(&account.login, &ctx.scope),
                 ctx.sender(),
             ));
         }
         if self.appeared.is_none() {
             self.appeared = Some(Moment::now());
         }
+    }
+
+    fn scope_changed(&mut self, ctx: &Ctx) {
+        self.data.clear();
+        self.view = 0;
+        self.filter.clear();
+        self.editing = false;
+        self.list = ListState::default();
+        self.selected = None;
+        self.cursor = None;
+        self.appeared = Some(Moment::now());
+        self.mount(ctx);
     }
 
     fn command(&mut self, command: Command, ctx: &Ctx) -> Option<Action> {
@@ -374,6 +527,8 @@ impl Tab for PullsTab {
             Command::Bottom => self.list.bottom(&rows),
             Command::PageDown => self.list.move_by(page, &rows),
             Command::PageUp => self.list.move_by(-page, &rows),
+            Command::NextGroup => self.list.jump_group(true, &rows),
+            Command::PrevGroup => self.list.jump_group(false, &rows),
             Command::Open => {
                 let (account, pr) = self.selected_pr(ctx)?;
                 return Some(Action::ShowDetail(Detail::Pull {
@@ -447,10 +602,14 @@ impl Tab for PullsTab {
     fn update(&mut self, action: &Action, ctx: &Ctx) {
         if let Action::Data(DataEvent::Pulls {
             account,
+            scope,
             view,
             result,
         }) = action
         {
+            if *scope != ctx.scope {
+                return;
+            }
             let data = self.data.entry((account.clone(), view)).or_default();
             match result {
                 Ok(loaded) => {
@@ -474,7 +633,12 @@ impl Tab for PullsTab {
         let [bar, list_area] =
             Layout::vertical([Constraint::Length(2), Constraint::Fill(1)]).areas(area.list);
         let rows = self.rows(ctx);
-        self.render_bar(frame, Rect { height: 1, ..bar }, rows.len(), ctx);
+        self.render_bar(
+            frame,
+            Rect { height: 1, ..bar },
+            rows.iter().filter(|r| r.is_item()).count(),
+            ctx,
+        );
         self.list_height = list_area.height;
 
         if rows.is_empty() {
@@ -574,13 +738,24 @@ impl Tab for PullsTab {
     }
 
     fn hints(&self) -> &'static [(&'static [Command], &'static str)] {
-        &[
-            (&[Command::Down, Command::Up], "move"),
-            (&[Command::Open], "open"),
-            (&[Command::CycleReason], "view"),
-            (&[Command::Filter], "filter"),
-            (&[Command::Browser], "browser"),
-        ]
+        if self.grouped {
+            &[
+                (&[Command::Down, Command::Up], "move"),
+                (&[Command::NextGroup, Command::PrevGroup], "groups"),
+                (&[Command::Open], "open"),
+                (&[Command::CycleReason], "view"),
+                (&[Command::Filter], "filter"),
+                (&[Command::Browser], "browser"),
+            ]
+        } else {
+            &[
+                (&[Command::Down, Command::Up], "move"),
+                (&[Command::Open], "open"),
+                (&[Command::CycleReason], "view"),
+                (&[Command::Filter], "filter"),
+                (&[Command::Browser], "browser"),
+            ]
+        }
     }
 
     fn jump_targets(&self) -> Vec<JumpTarget> {
@@ -682,6 +857,98 @@ mod tests {
                 .iter()
                 .all(|(_, pr)| pr.requested_reviewers.iter().any(|u| u.login == "you"))
         );
+    }
+
+    #[tokio::test]
+    async fn a_review_asked_of_a_team_needs_you() {
+        let (tab, ctx, _rx) = in_repo().await;
+        assert!(
+            View::Involved.queries("you", &ctx.scope)[0]
+                .reviewer
+                .is_some(),
+            "the review search must win when results are merged"
+        );
+        let visible = tab.visible(&ctx);
+        let (_, other) = visible
+            .iter()
+            .find(|(_, pr)| Group::of(pr, "you") == Group::Others)
+            .unwrap();
+        let mut pr = (*other).clone();
+        pr.requested_reviewers = vec![hit_core::model::User::new("acme/core")];
+        assert_eq!(Group::of(&pr, "you"), Group::Others);
+        pr.review_requested_of_viewer = true;
+        assert_eq!(Group::of(&pr, "you"), Group::NeedsYou);
+    }
+
+    async fn in_repo() -> (PullsTab, Ctx, tokio::sync::mpsc::UnboundedReceiver<Action>) {
+        let mut forges = Forges::new();
+        forges.add(Arc::new(MockForge::demo(MockOptions::instant())));
+        let repo = hit_core::RepoRef::new(
+            hit_core::Host::new(hit_forge_mock::DEMO_HOST),
+            "acme",
+            "rocket",
+        );
+        let (ctx, mut rx) = Ctx::for_tests(Services {
+            forges,
+            repo: Some(repo),
+            ..Services::default()
+        });
+        let mut tab = PullsTab::new();
+        tab.mount(&ctx);
+        while tab.visible(&ctx).is_empty() {
+            let action = rx.recv().await.unwrap();
+            tab.update(&action, &ctx);
+        }
+        (tab, ctx, rx)
+    }
+
+    #[tokio::test]
+    async fn a_repository_shows_what_needs_you_first() {
+        let (tab, ctx, _rx) = in_repo().await;
+        let shown = tab.visible(&ctx);
+        assert!(
+            shown
+                .iter()
+                .all(|(_, pr)| pr.reference.repo.to_string() == "acme/rocket")
+        );
+        let groups: Vec<Group> = tab
+            .slots(&ctx)
+            .iter()
+            .filter_map(|slot| match slot {
+                Slot::Header(group, _) => Some(*group),
+                Slot::Item(..) => None,
+            })
+            .collect();
+        assert_eq!(groups.first(), Some(&Group::NeedsYou), "{groups:?}");
+        assert!(groups.is_sorted(), "{groups:?}");
+        // The cursor starts on an item, not on the header.
+        let mut list = ListState::default();
+        list.fix(&tab.rows(&ctx));
+        assert!(matches!(
+            tab.slots(&ctx).get(list.selected),
+            Some(Slot::Item(..))
+        ));
+    }
+
+    #[tokio::test]
+    async fn results_of_another_scope_are_dropped() {
+        let (mut tab, ctx, _rx) = in_repo().await;
+        let before = tab.visible(&ctx).len();
+        let account = ctx.forges.iter().next().unwrap().account().clone();
+        tab.update(
+            &Action::Data(DataEvent::Pulls {
+                account,
+                scope: Scope::All,
+                view: "involved",
+                result: Ok(Loaded {
+                    value: Arc::new(Vec::new()),
+                    fetched_at: hit_core::Timestamp::now(),
+                    fresh: true,
+                }),
+            }),
+            &ctx,
+        );
+        assert_eq!(tab.visible(&ctx).len(), before);
     }
 
     #[tokio::test]

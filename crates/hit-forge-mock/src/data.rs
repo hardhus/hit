@@ -73,6 +73,7 @@ impl PrBuilder {
             labels: Vec::new(),
             assignees: Vec::new(),
             requested_reviewers: Vec::new(),
+            review_requested_of_viewer: false,
             review_decision: Some(ReviewDecision::ReviewRequired),
             checks: None,
             mergeable: Some(Mergeable::Mergeable),
@@ -369,6 +370,8 @@ impl Data {
             default_branch: Some("main".to_owned()),
             url: format!("https://{host}/{reference}"),
             pushed_at: Some(ago(now, pushed)),
+            open_prs: None,
+            open_issues: None,
         })
         .collect();
 

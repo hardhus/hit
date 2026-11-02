@@ -5,7 +5,7 @@ mod palette;
 
 use std::time::Duration;
 
-use hit_core::ForgeKind;
+use hit_core::{ForgeKind, RepoRef, query::Scope as RepoScope};
 use ratatui::{
     Frame,
     layout::Rect,
@@ -21,9 +21,9 @@ use crate::{
     browser,
     keymap::{Command, Scope},
     layout::{LayoutStrategy, TabsLayout},
-    screens::{FocusTab, InboxTab, IssuesTab, Placeholder, PullsTab, Tab, TabArea},
+    screens::{FocusTab, InboxTab, IssuesTab, PullsTab, ReposTab, Tab, TabArea},
     ui::{
-        chips::bold,
+        chips::{self, bold},
         hints,
         popup::Popup,
         tabs::{TabBar, TabSpec},
@@ -33,6 +33,9 @@ use crate::{
 use palette::{Entry, Outcome, Palette};
 
 const GLIDE: Duration = Duration::from_millis(220);
+/// A repository opens on its pull requests (audit D-045).
+const PULLS_TAB: usize = 2;
+const REPOS_TAB: usize = 4;
 
 pub struct Shell {
     tabs: Vec<Box<dyn Tab>>,
@@ -44,6 +47,8 @@ pub struct Shell {
     help: Option<Moment>,
     toasts: Toasts,
     warnings: Vec<String>,
+    /// Where `.` goes back to after showing all repositories.
+    last_repo: Option<RepoRef>,
 }
 
 impl Shell {
@@ -54,12 +59,7 @@ impl Shell {
                 Box::new(InboxTab::new()),
                 Box::new(PullsTab::new()),
                 Box::new(IssuesTab::new()),
-                Box::new(Placeholder::new(
-                    "Repos",
-                    "▣",
-                    "your repositories at a glance",
-                    "F8",
-                )),
+                Box::new(ReposTab::new()),
             ],
             active: 0,
             underline: (Tween::settled(f32::NAN), Tween::settled(0.0)),
@@ -69,6 +69,7 @@ impl Shell {
             help: None,
             toasts: Toasts::default(),
             warnings,
+            last_repo: None,
         }
     }
 
@@ -116,6 +117,16 @@ impl Shell {
             Command::Tab3 => self.switch(2, ctx),
             Command::Tab4 => self.switch(3, ctx),
             Command::Tab5 => self.switch(4, ctx),
+            Command::ToggleScope => {
+                if ctx.scope.repo().is_some() {
+                    return Some(Action::SetScope(RepoScope::All));
+                }
+                if let Some(repo) = self.last_repo.clone().or_else(|| ctx.home_repo.clone()) {
+                    return Some(Action::SetScope(RepoScope::Repo(repo)));
+                }
+                self.switch(REPOS_TAB, ctx);
+                self.toasts.push(Toast::info("pick a repository"));
+            }
             Command::CycleAccount if ctx.multi_account() => return Some(Action::CycleAccount),
             Command::CycleAccount => {
                 self.toasts
@@ -188,6 +199,13 @@ impl Shell {
     fn accounts_line(ctx: &Ctx) -> Line<'static> {
         let t = &ctx.theme;
         let mut spans = Vec::new();
+        if let Some(repo) = ctx.scope.repo() {
+            spans.push(Span::styled(
+                format!("⌂ {repo}"),
+                bold(chips::repo_color(repo, t)),
+            ));
+            spans.push(Span::raw("   "));
+        }
         for forge in ctx.forges.iter() {
             let account = forge.account();
             let shown = ctx.shows(account);
@@ -289,6 +307,9 @@ impl Shell {
 
 impl View for Shell {
     fn mount(&mut self, ctx: &Ctx) {
+        if ctx.scope.repo().is_some() {
+            self.active = PULLS_TAB;
+        }
         for tab in &mut self.tabs {
             tab.mount(ctx);
         }
@@ -353,6 +374,23 @@ impl View for Shell {
                 Some(account) => format!("showing only @{}", account.login),
                 None => "showing all accounts".to_owned(),
             })),
+            Action::SetScope(scope) => {
+                for tab in &mut self.tabs {
+                    tab.scope_changed(ctx);
+                }
+                match scope.repo() {
+                    Some(repo) => {
+                        self.last_repo = Some(repo.clone());
+                        // Picking a repository is a way in, not a place to stay.
+                        if self.active == REPOS_TAB {
+                            self.switch(PULLS_TAB, ctx);
+                        }
+                        self.toasts
+                            .push(Toast::info(format!("only {repo} · . shows everything")));
+                    }
+                    None => self.toasts.push(Toast::info("showing all repositories")),
+                }
+            }
             _ => {}
         }
         for tab in &mut self.tabs {
@@ -421,6 +459,14 @@ impl View for Shell {
             .get(self.active)
             .map(|tab| tab.hints().to_vec())
             .unwrap_or_default();
+        items.push((
+            &[Command::ToggleScope],
+            if ctx.scope.repo().is_some() {
+                "all repos"
+            } else {
+                "repo"
+            },
+        ));
         items.push((&[Command::NextTab], "tabs"));
         items.push((&[Command::Palette], "palette"));
         items.push((&[Command::Help], "help"));
@@ -525,6 +571,63 @@ mod tests {
             &ctx,
         );
         assert_eq!(shell.active, 2);
+    }
+
+    fn acme_rocket() -> RepoRef {
+        RepoRef::new(
+            hit_core::Host::new(hit_forge_mock::DEMO_HOST),
+            "acme",
+            "rocket",
+        )
+    }
+
+    /// Does what the app does with a scope change.
+    fn apply(shell: &mut Shell, ctx: &mut Ctx, action: Option<Action>) {
+        let Some(Action::SetScope(scope)) = action else {
+            panic!("expected a scope change, got {action:?}");
+        };
+        ctx.scope = scope.clone();
+        shell.update(&Action::SetScope(scope), ctx);
+    }
+
+    #[tokio::test]
+    async fn a_repository_opens_on_its_pull_requests_and_dot_leaves_it() {
+        let mut forges = Forges::new();
+        forges.add(Arc::new(MockForge::demo(MockOptions::instant())));
+        let (mut ctx, _rx) = Ctx::for_tests(Services {
+            forges,
+            repo: Some(acme_rocket()),
+            ..Services::default()
+        });
+        let mut shell = Shell::new(Vec::new());
+        shell.mount(&ctx);
+        assert_eq!(shell.active, PULLS_TAB);
+        let screen = render(&mut shell, &ctx);
+        assert!(screen.contains("⌂ acme/rocket"), "{screen}");
+        assert!(screen.contains("all open"), "{screen}");
+
+        let action = shell.handle_event(&key(KeyCode::Char('.')), &ctx);
+        apply(&mut shell, &mut ctx, action);
+        assert_eq!(ctx.scope, RepoScope::All);
+        let screen = render(&mut shell, &ctx);
+        assert!(!screen.contains("⌂ acme/rocket"), "{screen}");
+        assert!(screen.contains("involved"), "{screen}");
+
+        // And back to the same repository.
+        let action = shell.handle_event(&key(KeyCode::Char('.')), &ctx);
+        apply(&mut shell, &mut ctx, action);
+        assert_eq!(ctx.scope, RepoScope::Repo(acme_rocket()));
+    }
+
+    #[tokio::test]
+    async fn outside_a_repository_it_opens_on_focus_and_dot_offers_repos() {
+        let (ctx, _rx) = demo_ctx();
+        let mut shell = Shell::new(Vec::new());
+        shell.mount(&ctx);
+        assert_eq!(shell.active, 0);
+        shell.handle_event(&key(KeyCode::Char('.')), &ctx);
+        assert_eq!(shell.active, REPOS_TAB);
+        assert_eq!(ctx.scope, RepoScope::All);
     }
 
     #[tokio::test]

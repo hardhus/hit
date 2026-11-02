@@ -7,7 +7,8 @@ use hit_core::{
     Host, ItemRef, RepoRef, Timestamp,
     model::{
         CheckRun, CheckState, CheckSummary, CloseReason, Comment, Issue, IssueState, Label,
-        Mergeable, PrState, PullRequest, Review, ReviewDecision, ReviewState, Rgb, User,
+        Mergeable, PrState, PullRequest, RepoCounts, Review, ReviewDecision, ReviewState, Rgb,
+        User,
     },
 };
 use serde::Deserialize;
@@ -25,6 +26,7 @@ pub(crate) mod queries {
         include_str!("graphql/pull.graphql"),
         include_str!("graphql/fragments.graphql")
     );
+    pub const REPO_COUNTS: &str = include_str!("graphql/repo_counts.graphql");
     pub const ISSUE: &str = concat!(
         include_str!("graphql/issue.graphql"),
         include_str!("graphql/fragments.graphql")
@@ -249,6 +251,7 @@ impl PrNode {
                 .filter_map(|r| r.login.or(r.combined_slug))
                 .map(User::new)
                 .collect(),
+            review_requested_of_viewer: false,
             review_decision: match self.review_decision.as_deref() {
                 Some("APPROVED") => Some(ReviewDecision::Approved),
                 Some("CHANGES_REQUESTED") => Some(ReviewDecision::ChangesRequested),
@@ -346,6 +349,49 @@ pub(crate) struct SearchConnection {
     pub page_info: Option<PageInfo>,
     #[serde(default)]
     pub nodes: Vec<Option<SearchNode>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TotalCount {
+    total_count: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RepoCountsNode {
+    name: String,
+    owner: Login,
+    pull_requests: TotalCount,
+    issues: TotalCount,
+}
+
+impl RepoCountsNode {
+    pub fn into_model(self, host: &Host) -> RepoCounts {
+        RepoCounts {
+            reference: RepoRef::new(host.clone(), self.owner.login, self.name),
+            open_prs: self.pull_requests.total_count,
+            open_issues: self.issues.total_count,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ReposConnection {
+    pub page_info: Option<PageInfo>,
+    #[serde(default)]
+    pub nodes: Vec<Option<RepoCountsNode>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ReposViewer {
+    pub repositories: ReposConnection,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ReposData {
+    pub viewer: ReposViewer,
 }
 
 #[derive(Debug, Deserialize)]

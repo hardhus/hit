@@ -471,6 +471,9 @@ fn map_error(status: StatusCode, headers: &HeaderMap, message: String) -> ForgeE
             ForgeError::Forbidden { message, hint }
         }
         StatusCode::NOT_FOUND => ForgeError::NotFound,
+        StatusCode::BAD_GATEWAY | StatusCode::SERVICE_UNAVAILABLE | StatusCode::GATEWAY_TIMEOUT => {
+            ForgeError::Unavailable(status.to_string())
+        }
         other => ForgeError::InvalidResponse(format!("HTTP {other}: {message}")),
     }
 }

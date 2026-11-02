@@ -166,10 +166,20 @@ pub struct HostConfig {
     pub oauth_client_id: Option<String>,
 }
 
-/// Reserved for app-wide behaviour (startup view, default account, …).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// App-wide behaviour.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct GeneralConfig {}
+pub struct GeneralConfig {
+    /// Inside a git repository, open on that repository instead of the
+    /// overview of everything.
+    pub repo_context: bool,
+}
+
+impl Default for GeneralConfig {
+    fn default() -> Self {
+        Self { repo_context: true }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]

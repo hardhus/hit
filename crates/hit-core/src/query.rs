@@ -14,6 +14,14 @@ pub enum Scope {
 }
 
 impl Scope {
+    /// The repository this scope is narrowed to, if any.
+    pub fn repo(&self) -> Option<&RepoRef> {
+        match self {
+            Self::All => None,
+            Self::Repo(repo) => Some(repo),
+        }
+    }
+
     pub fn includes(&self, repo: &RepoRef) -> bool {
         match self {
             Self::All => true,

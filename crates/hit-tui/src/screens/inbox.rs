@@ -254,10 +254,14 @@ impl InboxTab {
             Span::styled("● ", bold(t.accent_alt))
         });
         top.push(kind_icon(&n.subject.kind, t));
-        top.push(Span::styled(
-            format!(" {} ", title_ref(n)),
-            Style::new().fg(t.muted),
-        ));
+        match &n.subject.item {
+            Some(item) => top.extend(chips::item_ref(item, ctx)),
+            None => {
+                top.push(Span::raw(" "));
+                top.extend(chips::repo_span(&n.repo, ctx));
+                top.push(Span::raw(" "));
+            }
+        }
         top.push(Span::styled(n.subject.title.clone(), bold(t.fg)));
 
         let (reason, color) = reason_style(&n.reason, t);
@@ -494,7 +498,7 @@ impl Tab for InboxTab {
     fn mount(&mut self, ctx: &Ctx) {
         self.stop();
         let unread_only = self.unread_only(ctx);
-        for forge in ctx.forges.iter() {
+        for forge in ctx.scoped_forges() {
             let data = self.accounts.entry(forge.account().clone()).or_default();
             if data.unread_only != unread_only {
                 *data = AccountInbox {
@@ -506,6 +510,7 @@ impl Tab for InboxTab {
             self.tasks.push(sync::spawn_inbox(
                 Arc::clone(forge),
                 ctx.cache.clone(),
+                ctx.scope.clone(),
                 unread_only,
                 ctx.prefs.refresh.notifications,
                 ctx.sender(),
@@ -514,6 +519,19 @@ impl Tab for InboxTab {
         if self.appeared.is_none() {
             self.appeared = Some(Moment::now());
         }
+    }
+
+    fn scope_changed(&mut self, ctx: &Ctx) {
+        self.accounts.clear();
+        self.filter.clear();
+        self.editing = false;
+        self.reason = None;
+        self.confirm_all = None;
+        self.list = ListState::default();
+        self.selected = None;
+        self.cursor = None;
+        self.appeared = Some(Moment::now());
+        self.mount(ctx);
     }
 
     fn command(&mut self, command: Command, ctx: &Ctx) -> Option<Action> {
@@ -671,10 +689,11 @@ impl Tab for InboxTab {
         match event {
             DataEvent::Notifications {
                 account,
+                scope,
                 unread_only,
                 result,
             } => {
-                if *unread_only != self.unread_only(ctx) {
+                if *scope != ctx.scope || *unread_only != self.unread_only(ctx) {
                     return;
                 }
                 let data = self.accounts.entry(account.clone()).or_default();

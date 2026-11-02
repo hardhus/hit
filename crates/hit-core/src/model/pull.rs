@@ -39,6 +39,11 @@ pub struct PullRequest {
     pub labels: Vec<Label>,
     pub assignees: Vec<User>,
     pub requested_reviewers: Vec<User>,
+    /// The forge's own search says this waits for the viewer's review. Also
+    /// true for a request to one of their teams, which `requested_reviewers`
+    /// only names as the team.
+    #[serde(default)]
+    pub review_requested_of_viewer: bool,
     pub review_decision: Option<ReviewDecision>,
     pub checks: Option<CheckSummary>,
     pub mergeable: Option<Mergeable>,

@@ -4,8 +4,8 @@
 mod focus;
 mod inbox;
 mod issues;
-mod placeholder;
 mod pulls;
+mod repos;
 
 use hit_core::{AccountId, ItemRef};
 use ratatui::{Frame, layout::Rect, text::Span};
@@ -13,8 +13,8 @@ use ratatui::{Frame, layout::Rect, text::Span};
 pub use focus::{FocusTab, issue_fields, pr_fields, spinner};
 pub use inbox::{InboxTab, notification_lines};
 pub use issues::IssuesTab;
-pub use placeholder::Placeholder;
 pub use pulls::{PullsTab, pr_icon, pr_status_spans};
+pub use repos::ReposTab;
 
 use crate::{Action, Ctx, Event, keymap::Command};
 
@@ -66,6 +66,12 @@ pub trait Tab {
 
     fn update(&mut self, action: &Action, ctx: &Ctx) {
         let _ = (action, ctx);
+    }
+
+    /// The app switched to another repository or back to all of them: what
+    /// is loaded no longer applies.
+    fn scope_changed(&mut self, ctx: &Ctx) {
+        let _ = ctx;
     }
 
     fn render(&mut self, frame: &mut Frame, area: TabArea, ctx: &Ctx);

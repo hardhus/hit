@@ -2,6 +2,7 @@ mod accounts;
 mod cli;
 mod commands;
 mod logging;
+mod repo;
 mod style;
 
 use std::process::ExitCode;
@@ -38,6 +39,7 @@ fn main() -> Result<ExitCode> {
                 config_file: &config_file,
                 log_level: cli.log_level.map(Into::into),
                 demo: cli.demo,
+                repo: cli.repo.as_deref(),
             };
             commands::tui::run(&paths, &options)?;
             Ok(ExitCode::SUCCESS)
