@@ -13,8 +13,8 @@ use hit_config::ConfigEdit;
 use hit_core::{
     Forge, ForgeError, ItemRef, Notifications, RepoRef, Timestamp,
     model::{
-        Issue, IssueDetail, Notification, NotificationId, PullRequest, PullRequestDetail, Repo,
-        RepoCounts,
+        CheckState, Issue, IssueDetail, Notification, NotificationId, PullRequest,
+        PullRequestDetail, Repo, RepoCounts,
     },
     query::{Cursor, IssueQuery, NotificationQuery, Page, PageRequest, PrQuery, Scope},
 };
@@ -683,7 +683,18 @@ pub fn spawn_pull(
                 }),
             }));
         };
-        let detail = || pulls.get(&item);
+        // What broke comes first, so it is one key away.
+        let detail = || async {
+            pulls.get(&item).await.map(|mut detail| {
+                detail.checks.sort_by_key(|check| match check.state {
+                    CheckState::Failure => 0,
+                    CheckState::Pending => 1,
+                    CheckState::Success => 2,
+                    CheckState::Neutral => 3,
+                });
+                detail
+            })
+        };
         let key = format!("pull:{item}");
         let (_, diff) = tokio::join!(load(&store, &key, true, detail, &send), pulls.diff(&item));
         let result = match diff {

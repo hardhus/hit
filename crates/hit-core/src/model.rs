@@ -15,7 +15,7 @@ mod review;
 mod user;
 
 pub use check::{CheckRun, CheckState, CheckSummary};
-pub use comment::Comment;
+pub use comment::{Comment, ReviewThread};
 pub use issue::{CloseReason, Issue, IssueDetail, IssueState};
 pub use label::{Label, Rgb};
 pub use notification::{Notification, NotificationId, NotificationReason, Subject, SubjectKind};

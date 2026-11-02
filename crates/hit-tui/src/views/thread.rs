@@ -3,7 +3,7 @@
 
 use hit_core::{
     ForgeError, Timestamp,
-    model::{Comment, Review, ReviewState},
+    model::{Comment, Review, ReviewState, ReviewThread},
 };
 use ratatui::{
     Frame,
@@ -14,7 +14,9 @@ use ratatui::{
 };
 
 use crate::{
-    Ctx, markdown,
+    Ctx,
+    keymap::Command,
+    markdown,
     screens::spinner,
     sync,
     ui::{chips::bold, wrapped_height},
@@ -39,11 +41,61 @@ pub fn placeholder(error: Option<&ForgeError>, ctx: &Ctx) -> Vec<Line<'static>> 
     }
 }
 
-/// The description, then comments and reviews, oldest first.
+/// Comments on lines of the diff: what is still open in full, what is
+/// resolved in one line.
+fn review_thread_lines(threads: &[ReviewThread], ctx: &Ctx) -> Vec<Line<'static>> {
+    let t = &ctx.theme;
+    let muted = Style::new().fg(t.muted);
+    let mut lines = Vec::new();
+    let open = threads.iter().filter(|thread| !thread.resolved).count();
+    lines.push(Line::from(vec![
+        Span::styled("Review comments", bold(t.accent_alt)),
+        Span::styled(format!("  {open} open"), muted),
+    ]));
+    let place = |thread: &ReviewThread| match thread.line {
+        Some(line) => format!("{}:{line}", thread.path),
+        None => thread.path.clone(),
+    };
+    for thread in threads.iter().filter(|thread| !thread.resolved) {
+        let mut head = vec![
+            Span::styled("◐ ", bold(t.warning)),
+            Span::styled(place(thread), bold(t.fg)),
+        ];
+        if thread.outdated {
+            head.push(Span::styled("  outdated", muted));
+        }
+        lines.push(Line::from(head));
+        for comment in &thread.comments {
+            lines.push(Line::from(vec![
+                Span::styled("│ ", Style::new().fg(t.border)),
+                Span::styled(format!("@{}", comment.author.login), bold(t.fg)),
+                Span::styled(format!(" · {}", sync::ago(comment.created_at)), muted),
+            ]));
+            for line in markdown::render(&comment.body, t) {
+                let mut spans = vec![Span::styled("│ ", Style::new().fg(t.border))];
+                spans.extend(line.spans);
+                lines.push(Line::from(spans));
+            }
+        }
+    }
+    for thread in threads.iter().filter(|thread| thread.resolved) {
+        lines.push(Line::from(vec![
+            Span::styled("✓ ", bold(t.success)),
+            Span::styled(format!("{} · resolved", place(thread)), muted),
+        ]));
+    }
+    lines.push(Line::raw(""));
+    lines
+}
+
+/// The description, comments on lines, then comments and reviews, oldest
+/// first. `earlier` comments did not fit and are on the forge.
 pub fn lines(
     body: &str,
     comments: &[Comment],
+    earlier: u32,
     reviews: &[Review],
+    review_threads: &[ReviewThread],
     ctx: &Ctx,
 ) -> Vec<Line<'static>> {
     let t = &ctx.theme;
@@ -56,6 +108,19 @@ pub fn lines(
         lines.extend(description);
     }
     lines.push(Line::raw(""));
+    if !review_threads.is_empty() {
+        lines.extend(review_thread_lines(review_threads, ctx));
+    }
+    if earlier > 0 {
+        lines.push(Line::styled(
+            format!(
+                "··· {earlier} earlier comments · {} opens them in the browser",
+                ctx.keymap.short(Command::Browser)
+            ),
+            muted,
+        ));
+        lines.push(Line::raw(""));
+    }
 
     enum Event<'a> {
         Comment(&'a Comment),

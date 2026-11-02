@@ -24,7 +24,7 @@ use ratatui::{
 };
 use tokio::task::JoinHandle;
 
-use super::{JumpTarget, Tab, TabArea, focus::spinner, issue_fields};
+use super::{FocusAsks, JumpTarget, Tab, TabArea, focus::spinner, issue_fields};
 use crate::{
     Action, Ctx, DataEvent, Event,
     action::{Detail, Toast},
@@ -135,7 +135,7 @@ impl Group {
 
     fn title(self) -> &'static str {
         match self {
-            Self::NeedsYou => "Assigned to you",
+            Self::NeedsYou => "Needs you",
             Self::Yours => "You opened",
             Self::Others => "Everything else",
         }
@@ -174,6 +174,7 @@ pub struct IssuesTab {
     /// Shown issues carry at least one of these.
     labels: BTreeSet<String>,
     picker: Option<Picker>,
+    asks: FocusAsks,
     list: ListState,
     selected: Option<(AccountId, ItemRef)>,
     reveal_pending: bool,
@@ -262,8 +263,8 @@ impl IssuesTab {
             .collect();
         // Two accounts can see the same issue; keep the one it asks the most of.
         items.sort_by(|(a, x), (b, y)| {
-            Group::of(x, &a.login)
-                .cmp(&Group::of(y, &b.login))
+            self.group(a, x)
+                .cmp(&self.group(b, y))
                 .then_with(|| a.login.cmp(&b.login))
         });
         let mut seen = HashSet::new();
@@ -393,15 +394,15 @@ impl IssuesTab {
             return items.into_iter().map(|(a, i)| Slot::Item(a, i)).collect();
         }
         // Stable: keeps the time order inside each group.
-        items.sort_by_key(|(account, issue)| Group::of(issue, &account.login));
+        items.sort_by_key(|(account, issue)| self.group(account, issue));
         let mut slots = Vec::with_capacity(items.len() + 3);
         let mut current = None;
         for (index, (account, issue)) in items.iter().enumerate() {
-            let group = Group::of(issue, &account.login);
+            let group = self.group(account, issue);
             if current != Some(group) {
                 let count = items[index..]
                     .iter()
-                    .take_while(|(a, i)| Group::of(i, &a.login) == group)
+                    .take_while(|(a, i)| self.group(a, i) == group)
                     .count();
                 slots.push(Slot::Header(group, count));
                 current = Some(group);
@@ -422,7 +423,32 @@ impl IssuesTab {
         ]))
     }
 
-    fn row(account: &AccountId, issue: &Issue, ctx: &Ctx) -> Row {
+    fn group(&self, account: &AccountId, issue: &Issue) -> Group {
+        if self.asks.reasons(account, &issue.reference).is_empty() {
+            Group::of(issue, &account.login)
+        } else {
+            Group::NeedsYou
+        }
+    }
+
+    /// Why this issue asks for the user, in a repository's first view.
+    fn reason_spans(&self, account: &AccountId, issue: &Issue, ctx: &Ctx) -> Vec<Span<'static>> {
+        if !self.is_grouped(ctx) {
+            return Vec::new();
+        }
+        let mut reasons = focus::issue_reasons(issue, &account.login, false);
+        reasons.extend_from_slice(self.asks.reasons(account, &issue.reference));
+        reasons.sort();
+        reasons.dedup();
+        let mut spans = Vec::new();
+        for reason in reasons {
+            spans.push(chips::reason_span(reason, &ctx.theme));
+            spans.push(Span::raw("  "));
+        }
+        spans
+    }
+
+    fn row(&self, account: &AccountId, issue: &Issue, ctx: &Ctx) -> Row {
         let t = &ctx.theme;
         let mut top = Vec::new();
         if let Some(badge) = chips::account_badge(account, ctx) {
@@ -437,11 +463,9 @@ impl IssuesTab {
             .iter()
             .find_map(|l| l.color)
             .map_or(t.accent, |c| Color::Rgb(c.0, c.1, c.2));
-        Row::item(
-            Line::from(top),
-            Line::from(issue_status_spans(issue, ctx)),
-            accent,
-        )
+        let mut bottom = self.reason_spans(account, issue, ctx);
+        bottom.extend(issue_status_spans(issue, ctx));
+        Row::item(Line::from(top), Line::from(bottom), accent)
     }
 
     fn rows(&self, ctx: &Ctx) -> Vec<Row> {
@@ -449,7 +473,7 @@ impl IssuesTab {
             .into_iter()
             .map(|slot| match slot {
                 Slot::Header(group, count) => Self::header(group, count, ctx),
-                Slot::Item(account, issue) => Self::row(account, issue, ctx),
+                Slot::Item(account, issue) => self.row(account, issue, ctx),
             })
             .collect()
     }
@@ -662,6 +686,7 @@ impl Tab for IssuesTab {
     }
 
     fn scope_changed(&mut self, ctx: &Ctx) {
+        self.asks = FocusAsks::default();
         self.data.clear();
         self.view = 0;
         self.filter.clear();
@@ -789,6 +814,7 @@ impl Tab for IssuesTab {
     }
 
     fn update(&mut self, action: &Action, ctx: &Ctx) {
+        self.asks.update(action, ctx);
         if let Action::Data(DataEvent::IssuesMore {
             account,
             scope,

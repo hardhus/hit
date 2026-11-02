@@ -3,7 +3,8 @@ query Issue($owner: String!, $name: String!, $number: Int!) {
     issue(number: $number) {
       ...Iss
       body
-      thread: comments(first: 50) {
+      thread: comments(last: 50) {
+        totalCount
         nodes { id body createdAt updatedAt author { __typename login } }
       }
     }

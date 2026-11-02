@@ -9,8 +9,8 @@ use hit_core::{
     model::{
         CheckRun, CheckState, CheckSummary, CloseReason, Comment, Issue, IssueDetail, IssueState,
         Label, Mergeable, Notification, NotificationId, NotificationReason, PrState, PullRequest,
-        PullRequestDetail, Repo, Review, ReviewDecision, ReviewState, Rgb, Subject, SubjectKind,
-        User,
+        PullRequestDetail, Repo, Review, ReviewDecision, ReviewState, ReviewThread, Rgb, Subject,
+        SubjectKind, User,
     },
 };
 use jiff::SignedDuration;
@@ -94,7 +94,9 @@ impl PrBuilder {
                 pr,
                 body: String::new(),
                 comments: Vec::new(),
+                earlier_comments: 0,
                 reviews: Vec::new(),
+                review_threads: Vec::new(),
                 checks: Vec::new(),
             },
             diff: None,
@@ -178,6 +180,32 @@ impl PrBuilder {
         self
     }
 
+    fn review_thread(
+        mut self,
+        path: &str,
+        line: u32,
+        resolved: bool,
+        author: &str,
+        minutes_ago: i64,
+        body: &str,
+    ) -> Self {
+        let at = ago(self.now, minutes_ago);
+        self.detail.review_threads.push(ReviewThread {
+            path: path.to_owned(),
+            line: Some(line),
+            resolved,
+            outdated: false,
+            comments: vec![Comment {
+                id: format!("t{}-{line}", self.detail.pr.reference.number),
+                author: user(author),
+                body: body.to_owned(),
+                created_at: at,
+                updated_at: at,
+            }],
+        });
+        self
+    }
+
     fn comment(mut self, author: &str, minutes_ago: i64, body: &str) -> Self {
         let at = ago(self.now, minutes_ago);
         let id = format!(
@@ -249,6 +277,7 @@ impl IssueBuilder {
                 },
                 body: String::new(),
                 comments: Vec::new(),
+                earlier_comments: 0,
             },
             now,
         }
@@ -390,6 +419,8 @@ impl Data {
                 .body("Uploads to the artifact store fail ~2% of the time with transient 503s.\n\nThis retries transient errors with exponential backoff (200ms, 400ms, 800ms…).\n\nCloses #57")
                 .comment("mira", 3 * HOUR, "Nice! Can we cap the total delay so CI doesn't hang?")
                 .comment(me, 2 * HOUR, "Good call, 5 attempts tops out at ~6s. Adding a test.")
+                .review_thread("src/upload.rs", 41, false, "mira", 3 * HOUR, "This retries forever if the server keeps answering 500. Cap it?")
+                .review_thread("src/upload.rs", 58, true, "mira", 5 * HOUR, "Typo in the log message.")
                 .diff(UPLOAD_DIFF)
                 .build(),
             // Review requested from me.

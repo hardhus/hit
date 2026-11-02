@@ -512,6 +512,105 @@ fn notification_json(id: &str, kind: &str, number: Option<u64>, reason: &str) ->
 }
 
 #[tokio::test]
+async fn notifications_link_to_the_right_page() {
+    let server = MockServer::start().await;
+    let subject = |kind: &str, url: Option<&str>| {
+        let mut json = notification_json("1", kind, None, "subscribed");
+        json["subject"]["url"] = json!(url);
+        json
+    };
+    Mock::given(method("GET"))
+        .and(path("/api/notifications"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            subject("CheckSuite", None),
+            subject(
+                "Release",
+                Some("https://api.github.com/repos/acme/rocket/releases/9")
+            ),
+            subject(
+                "Commit",
+                Some("https://api.github.com/repos/acme/rocket/commits/abc123")
+            ),
+            subject(
+                "Commit",
+                Some("https://api.github.com/repos/acme/rocket/commits/../x")
+            ),
+            subject(
+                "Discussion",
+                Some("https://api.github.com/repos/acme/rocket/discussions/4")
+            ),
+            subject("Discussion", None),
+            subject("RepositoryInvitation", None),
+        ])))
+        .mount(&server)
+        .await;
+    let page = Notifications::list(
+        &default_forge(&server),
+        &NotificationQuery::default(),
+        &PageRequest::first(50),
+    )
+    .await
+    .unwrap();
+    let links: Vec<&str> = page
+        .items
+        .iter()
+        .map(|n| n.subject.url.as_deref().unwrap())
+        .map(|url| url.split("acme/rocket").nth(1).unwrap())
+        .collect();
+    assert_eq!(
+        links,
+        [
+            "/actions",
+            "/releases",
+            "/commit/abc123",
+            "/commits",
+            "/discussions/4",
+            "/discussions",
+            "",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_long_conversation_keeps_its_latest_comments_and_lines() {
+    let server = MockServer::start().await;
+    let comment = |body: &str| {
+        json!({
+            "id": "1", "body": body,
+            "createdAt": "2026-10-01T10:00:00Z", "updatedAt": "2026-10-01T10:00:00Z",
+            "author": { "__typename": "User", "login": "mira" }
+        })
+    };
+    let mut pr = pr_json("acme/rocket", 7, "mira", json!({}));
+    pr["body"] = json!("");
+    pr["thread"] = json!({ "totalCount": 120, "nodes": [comment("latest")] });
+    pr["reviewThreads"] = json!({ "nodes": [{
+        "path": "src/main.rs", "line": 42, "isResolved": false, "isOutdated": true,
+        "comments": { "nodes": [comment("why this?")] }
+    }, {
+        "path": "src/gone.rs", "line": null, "isResolved": true, "isOutdated": false,
+        "comments": { "nodes": [] }
+    }] });
+    graphql_reply(&server, json!({ "repository": { "pullRequest": pr } })).await;
+
+    let detail = PullRequests::get(&default_forge(&server), &ItemRef::pull_request(rocket(), 7))
+        .await
+        .unwrap();
+    assert_eq!(detail.comments[0].body, "latest");
+    assert_eq!(detail.earlier_comments, 119);
+    let [open, done] = detail.review_threads.as_slice() else {
+        panic!("expected two threads");
+    };
+    assert_eq!(
+        (open.path.as_str(), open.line, open.resolved),
+        ("src/main.rs", Some(42), false)
+    );
+    assert!(open.outdated);
+    assert_eq!(open.comments[0].body, "why this?");
+    assert_eq!((done.line, done.resolved), (None, true));
+}
+
+#[tokio::test]
 async fn notifications_list_and_paging() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))

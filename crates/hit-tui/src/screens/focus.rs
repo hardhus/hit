@@ -628,11 +628,13 @@ impl Tab for FocusTab {
             }
             Command::Open => {
                 let (account, item) = self.selected_item(ctx)?;
+                let checks_first = item.reasons.first() == Some(&FocusReason::ChecksFailing);
                 return Some(Action::ShowDetail(match item.subject {
                     FocusSubject::PullRequest(pr) => Detail::Pull {
                         account,
                         item: pr.reference.clone(),
                         summary: Some(Box::new(pr)),
+                        checks_first,
                     },
                     FocusSubject::Issue(issue) => Detail::Issue {
                         account,
