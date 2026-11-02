@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Instant};
+use std::{path::PathBuf, sync::Arc, time::Instant};
 
 use hit_cache::Cache;
 use hit_config::{Config, InboxConfig, RefreshConfig, SortOrder};
@@ -20,6 +20,8 @@ pub struct Services {
     /// The repository to open on (detected from the current folder or asked
     /// for with `--repo`).
     pub repo: Option<RepoRef>,
+    /// Where settings are saved; `None` keeps them in memory (the demo).
+    pub config_file: Option<PathBuf>,
 }
 
 /// Preferences views read; from the config, some adjustable at runtime.
@@ -51,6 +53,12 @@ pub struct Ctx {
     pub cache: Option<Arc<Cache>>,
     pub prefs: Prefs,
     pub keymap: Keymap,
+    /// The settings as they are now.
+    pub config: Config,
+    /// The settings hit started with: what is not applied live still works
+    /// this way.
+    pub started_config: Config,
+    pub config_file: Option<PathBuf>,
     /// Only this account is shown; `None` shows all (audit D-039). Future
     /// profiles will set this instead of views knowing about accounts.
     pub account_filter: Option<AccountId>,
@@ -64,22 +72,23 @@ pub struct Ctx {
 
 impl Ctx {
     pub fn new(
-        theme: Theme,
-        animations: bool,
+        config: &Config,
         services: Services,
-        prefs: Prefs,
         keymap: Keymap,
         tx: mpsc::UnboundedSender<Action>,
     ) -> Self {
         let scope = services.repo.clone().map_or(Scope::All, Scope::Repo);
         Self {
-            theme,
-            animations,
+            theme: Theme::from_config(&config.ui),
+            animations: config.ui.animations,
             forges: services.forges,
             login: services.login,
             cache: services.cache,
-            prefs,
+            prefs: Prefs::from_config(config),
             keymap,
+            config: config.clone(),
+            started_config: config.clone(),
+            config_file: services.config_file,
             account_filter: None,
             scope,
             home_repo: services.repo,
@@ -92,15 +101,25 @@ impl Ctx {
     #[cfg(test)]
     pub(crate) fn for_tests(services: Services) -> (Self, mpsc::UnboundedReceiver<Action>) {
         let (tx, rx) = mpsc::unbounded_channel();
-        let ctx = Self::new(
-            Theme::jinx(true, true),
-            false,
-            services,
-            Prefs::from_config(&Config::default()),
-            Keymap::default(),
-            tx,
-        );
+        let config = Config::default();
+        let mut ctx = Self::new(&config, services, Keymap::default(), tx);
+        ctx.theme = Theme::jinx(true, true);
+        ctx.animations = false;
         (ctx, rx)
+    }
+
+    /// Puts changed settings to work. What needs a restart only takes effect
+    /// through `started_config` staying as it was.
+    pub(crate) fn apply_config(&mut self, config: &Config) {
+        self.theme = Theme::from_config(&config.ui);
+        self.animations = config.ui.animations;
+        self.prefs = Prefs::from_config(config);
+        if config.auth.read_only {
+            for forge in self.forges.iter() {
+                forge.lock_read_only();
+            }
+        }
+        self.config = config.clone();
     }
 
     /// Seconds since the app started; drives animations.
@@ -184,5 +203,56 @@ pub trait View {
     /// While any view animates, the app redraws at the configured frame cap.
     fn is_animating(&self) -> bool {
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use hit_core::{ForgeKind, Host};
+
+    use super::*;
+
+    struct Spy {
+        account: AccountId,
+        locked: AtomicBool,
+    }
+
+    impl Forge for Spy {
+        fn kind(&self) -> ForgeKind {
+            ForgeKind::GitHub
+        }
+
+        fn account(&self) -> &AccountId {
+            &self.account
+        }
+
+        fn lock_read_only(&self) {
+            self.locked.store(true, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn turning_read_only_on_locks_every_account_at_once() {
+        let spy = Arc::new(Spy {
+            account: AccountId::new(Host::new("example.test"), "someone"),
+            locked: AtomicBool::new(false),
+        });
+        let mut forges = Forges::new();
+        forges.add(Arc::clone(&spy) as Arc<dyn Forge>);
+        let (mut ctx, _rx) = Ctx::for_tests(Services {
+            forges,
+            ..Services::default()
+        });
+
+        let mut config = Config::default();
+        config.ui.animations = false;
+        ctx.apply_config(&config);
+        assert!(!spy.locked.load(Ordering::Relaxed));
+
+        config.auth.read_only = true;
+        ctx.apply_config(&config);
+        assert!(spy.locked.load(Ordering::Relaxed));
     }
 }

@@ -1,5 +1,6 @@
 use std::{fmt, sync::Arc};
 
+use hit_config::Config;
 use hit_core::{
     AccountId, Forge, ForgeError, ItemRef,
     auth::DeviceCode,
@@ -37,6 +38,17 @@ pub enum Action {
     Toast(Toast),
     /// Run a command as if its key was pressed (from the palette).
     Run(Command),
+    /// Open the settings screen.
+    OpenSettings,
+    /// A setting changed: apply it now.
+    ConfigChanged(ConfigChange),
+}
+
+#[derive(Debug, Clone)]
+pub struct ConfigChange {
+    pub config: Box<Config>,
+    /// Refresh loops have to start over to pick it up.
+    pub reload: bool,
 }
 
 /// Results of background fetches, tagged with the account they belong to.

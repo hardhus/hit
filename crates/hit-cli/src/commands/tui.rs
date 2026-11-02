@@ -80,6 +80,7 @@ pub fn run(paths: &Paths, options: &Options<'_>) -> Result<()> {
             login: accounts::tui_login(&loaded.config, paths),
             cache: accounts::open_cache(&loaded.config, paths),
             repo: None,
+            config_file: Some(options.config_file.to_path_buf()),
         }
     };
     match repo_to_open(options, &loaded.config, &services.forges) {

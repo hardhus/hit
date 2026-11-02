@@ -5,7 +5,10 @@
 
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, MutexGuard, PoisonError},
+    sync::{
+        Arc, Mutex, MutexGuard, PoisonError,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -104,6 +107,8 @@ pub struct Api {
     host: GithubHost,
     token: Secret,
     options: ApiOptions,
+    /// Read-only was turned on while hit runs; shared by clones.
+    locked: Arc<AtomicBool>,
     /// Validators and bodies of recent conditional `GET`s, by URL.
     conditional: Arc<Mutex<HashMap<String, Stored>>>,
 }
@@ -155,6 +160,7 @@ impl Api {
             host,
             token,
             options,
+            locked: Arc::default(),
             conditional: Arc::default(),
         }
     }
@@ -164,7 +170,15 @@ impl Api {
     }
 
     pub fn options(&self) -> ApiOptions {
-        self.options
+        ApiOptions {
+            read_only: self.options.read_only || self.locked.load(Ordering::Relaxed),
+            ..self.options
+        }
+    }
+
+    /// Refuses writes from now on; see [`hit_core::Forge::lock_read_only`].
+    pub fn lock_read_only(&self) {
+        self.locked.store(true, Ordering::Relaxed);
     }
 
     /// Key for encrypting this account's local cache, derived from the token
@@ -191,7 +205,7 @@ impl Api {
 
     /// Sends a request to `path`, relative to the REST base.
     pub async fn send(&self, method: Method, path: &str, op: Op) -> Result<Response, ForgeError> {
-        guard(&method, op, self.options)?;
+        guard(&method, op, self.options())?;
         let url = self.url(path)?;
         self.execute(method, url, JSON, None).await
     }
@@ -204,7 +218,7 @@ impl Api {
         op: Op,
         body: &serde_json::Value,
     ) -> Result<Response, ForgeError> {
-        guard(&method, op, self.options)?;
+        guard(&method, op, self.options())?;
         let url = self.url(path)?;
         self.execute(method, url, JSON, Some(body)).await
     }
@@ -246,7 +260,7 @@ impl Api {
         query: &str,
         variables: serde_json::Value,
     ) -> Result<T, ForgeError> {
-        guard_graphql(query, self.options)?;
+        guard_graphql(query, self.options())?;
         let url = self.host.graphql().clone();
         let body = serde_json::json!({ "query": query, "variables": variables });
         let response = self.execute(Method::POST, url, JSON, Some(&body)).await?;
@@ -598,6 +612,25 @@ mod tests {
         ] {
             assert!(api.get(bad).await.is_err(), "{bad}");
         }
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn turning_read_only_on_works_right_away() {
+        let server = MockServer::start().await;
+        let api = api(&server, ApiOptions::default()).await;
+        let clone = api.clone();
+        assert!(!api.options().read_only);
+
+        clone.lock_read_only();
+
+        assert!(api.options().read_only);
+        let err = api.send(Method::POST, "repos/a/b/issues", Op::Write).await;
+        assert!(matches!(err, Err(ForgeError::ReadOnly(_))));
+        let err = api
+            .graphql::<serde_json::Value>("mutation { x }", serde_json::json!({}))
+            .await;
+        assert!(matches!(err, Err(ForgeError::ReadOnly(_))));
         assert!(server.received_requests().await.unwrap().is_empty());
     }
 

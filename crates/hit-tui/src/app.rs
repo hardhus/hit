@@ -6,13 +6,13 @@ use ratatui::{Frame, widgets::Block};
 use tokio::{sync::mpsc, time::MissedTickBehavior};
 
 use crate::{
-    Action, Ctx, Event, Prefs, Services, Theme, TuiError, View,
+    Action, Ctx, Event, Services, TuiError, View,
     action::{Detail, Toast},
     event::EventSource,
     keymap::Keymap,
     shell::Shell,
     terminal::{self, Term, TerminalGuard},
-    views::{DetailView, IssueView, LoginView, PullView, Welcome},
+    views::{DetailView, IssueView, LoginView, PullView, SettingsView, Welcome},
 };
 
 /// Runs the TUI until the user quits or a shutdown signal arrives.
@@ -48,20 +48,11 @@ pub struct App {
 impl App {
     pub fn new(config: &Config, services: Services, keymap: Keymap) -> Self {
         let (tx, actions) = mpsc::unbounded_channel();
-        let theme = Theme::from_config(&config.ui);
-        let fps = f64::from(config.ui.max_fps.max(1));
         Self {
             views: Vec::new(),
-            ctx: Ctx::new(
-                theme,
-                config.ui.animations,
-                services,
-                Prefs::from_config(config),
-                keymap,
-                tx,
-            ),
+            ctx: Ctx::new(config, services, keymap, tx),
             actions,
-            frame_interval: Duration::from_secs_f64(1.0 / fps),
+            frame_interval: frame_interval(config),
             dirty: true,
             quit: false,
         }
@@ -95,6 +86,10 @@ impl App {
         tokio::pin!(shutdown);
 
         while !self.quit {
+            if frames.period() != self.frame_interval {
+                frames = tokio::time::interval(self.frame_interval);
+                frames.set_missed_tick_behavior(MissedTickBehavior::Skip);
+            }
             if self.dirty {
                 self.draw(term)?;
                 self.dirty = false;
@@ -173,6 +168,19 @@ impl App {
                 }
             }
             Action::Redraw => {}
+            Action::OpenSettings => {
+                self.push(Box::new(SettingsView::new()));
+                return;
+            }
+            Action::ConfigChanged(ref change) => {
+                self.ctx.apply_config(&change.config);
+                self.frame_interval = frame_interval(&change.config);
+                for view in &mut self.views {
+                    view.update(&action, &self.ctx);
+                }
+                self.dirty = true;
+                return;
+            }
             // Background results and toasts concern every view, not just
             // the one on top (e.g. the shell under a detail view).
             Action::Data(_) | Action::Toast(_) => {
@@ -261,6 +269,10 @@ impl App {
         }
         self.dirty = true;
     }
+}
+
+fn frame_interval(config: &Config) -> Duration {
+    Duration::from_secs_f64(1.0 / f64::from(config.ui.max_fps.max(1)))
 }
 
 fn render(frame: &mut Frame, views: &mut [Box<dyn View>], ctx: &Ctx) {

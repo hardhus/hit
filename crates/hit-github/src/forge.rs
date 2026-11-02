@@ -144,6 +144,14 @@ impl Forge for GithubForge {
         Some(self)
     }
 
+    fn is_read_only(&self) -> bool {
+        self.api.options().read_only
+    }
+
+    fn lock_read_only(&self) {
+        self.api.lock_read_only();
+    }
+
     fn local_key(&self) -> Option<hit_core::Zeroizing<[u8; 32]>> {
         Some(self.api.local_key())
     }

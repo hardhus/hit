@@ -5,10 +5,11 @@
 //! how old it is. Loops end when their task is aborted (the view went away
 //! or the user asked to refresh).
 
-use std::{collections::HashSet, future::Future, sync::Arc, time::Duration};
+use std::{collections::HashSet, future::Future, path::PathBuf, sync::Arc, time::Duration};
 
 use futures::future::try_join_all;
 use hit_cache::{Cache, Vault};
+use hit_config::ConfigEdit;
 use hit_core::{
     Forge, ForgeError, ItemRef, Notifications, RepoRef, Timestamp,
     model::{
@@ -20,7 +21,7 @@ use hit_core::{
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::{sync::mpsc, task::JoinHandle};
 
-use crate::{Action, DataEvent, Theme, highlight::highlight_diff};
+use crate::{Action, DataEvent, Theme, Toast, highlight::highlight_diff};
 
 /// A value and where it came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,6 +100,32 @@ where
     if let Ok(Err(e)) = result {
         tracing::warn!(error = %e, key, "could not update the cache");
     }
+}
+
+/// Saves settings off the UI thread, in order, keeping only the latest value
+/// when several are waiting (holding a key down). Ends, after the last write,
+/// when the sender goes away with the settings screen.
+pub fn spawn_config_writer(
+    path: PathBuf,
+    tx: mpsc::UnboundedSender<Action>,
+) -> mpsc::UnboundedSender<ConfigEdit> {
+    let (edits, mut pending) = mpsc::unbounded_channel::<ConfigEdit>();
+    tokio::task::spawn_blocking(move || {
+        while let Some(first) = pending.blocking_recv() {
+            let mut batch = vec![first];
+            while let Ok(edit) = pending.try_recv() {
+                batch.retain(|e| (e.section, e.key) != (edit.section, edit.key));
+                batch.push(edit);
+            }
+            if let Err(e) = hit_config::apply_edits(&path, &batch) {
+                tracing::warn!(error = %e, "could not save settings");
+                let _ = tx.send(Action::Toast(Toast::error(format!(
+                    "couldn't save: {e} · the change lasts until you quit"
+                ))));
+            }
+        }
+    });
+    edits
 }
 
 /// One stale-while-revalidate round.
@@ -826,6 +853,39 @@ mod tests {
         assert!(
             matches!(&events[0], DataEvent::Repos { result: Ok(l), .. } if l.fresh && !l.value.is_empty())
         );
+    }
+
+    #[tokio::test]
+    async fn settings_reach_the_file_and_problems_come_back_as_toasts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let edit = |value| ConfigEdit {
+            section: "ui",
+            key: "animations",
+            value: hit_config::SettingValue::Bool(value),
+        };
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let writer = spawn_config_writer(path.clone(), tx);
+        writer.send(edit(true)).unwrap();
+        writer.send(edit(false)).unwrap();
+        while !hit_config::load(&path).warnings.is_empty()
+            || hit_config::load(&path).config.ui.animations
+        {
+            tokio::task::yield_now().await;
+        }
+        drop(writer);
+        assert!(rx.recv().await.is_none(), "no problems reported");
+
+        std::fs::write(&path, "[ui").unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let writer = spawn_config_writer(path.clone(), tx);
+        writer.send(edit(true)).unwrap();
+        let Some(Action::Toast(toast)) = rx.recv().await else {
+            panic!("expected a toast");
+        };
+        assert!(toast.message.contains("syntax error"), "{}", toast.message);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "[ui");
     }
 
     #[test]

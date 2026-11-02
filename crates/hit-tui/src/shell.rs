@@ -49,6 +49,9 @@ pub struct Shell {
     warnings: Vec<String>,
     /// Where `.` goes back to after showing all repositories.
     last_repo: Option<RepoRef>,
+    /// A setting asks for fresh refresh loops. They start when the settings
+    /// screen closes, so holding a key down does not hit the forge each step.
+    reload_pending: bool,
 }
 
 impl Shell {
@@ -70,6 +73,7 @@ impl Shell {
             toasts: Toasts::default(),
             warnings,
             last_repo: None,
+            reload_pending: false,
         }
     }
 
@@ -127,6 +131,7 @@ impl Shell {
                 self.switch(REPOS_TAB, ctx);
                 self.toasts.push(Toast::info("pick a repository"));
             }
+            Command::Settings => return Some(Action::OpenSettings),
             Command::CycleAccount if ctx.multi_account() => return Some(Action::CycleAccount),
             Command::CycleAccount => {
                 self.toasts
@@ -374,6 +379,13 @@ impl View for Shell {
                 Some(account) => format!("showing only @{}", account.login),
                 None => "showing all accounts".to_owned(),
             })),
+            Action::ConfigChanged(change) if change.reload => self.reload_pending = true,
+            Action::Back if self.reload_pending => {
+                self.reload_pending = false;
+                for tab in &mut self.tabs {
+                    tab.mount(ctx);
+                }
+            }
             Action::SetScope(scope) => {
                 for tab in &mut self.tabs {
                     tab.scope_changed(ctx);
@@ -470,6 +482,7 @@ impl View for Shell {
         items.push((&[Command::NextTab], "tabs"));
         items.push((&[Command::Palette], "palette"));
         items.push((&[Command::Help], "help"));
+        items.push((&[Command::Settings], "settings"));
         frame.render_widget(
             Paragraph::new(hints::line(&items, &ctx.keymap, t)),
             Rect {
@@ -523,6 +536,25 @@ mod tests {
 
     fn key(code: KeyCode) -> Event {
         Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    #[tokio::test]
+    async fn comma_opens_settings_and_refresh_changes_wait_for_it_to_close() {
+        let (ctx, _rx) = Ctx::for_tests(Services::default());
+        let mut shell = Shell::new(Vec::new());
+        assert!(matches!(
+            shell.handle_event(&key(KeyCode::Char(',')), &ctx),
+            Some(Action::OpenSettings)
+        ));
+
+        let change = crate::action::ConfigChange {
+            config: Box::default(),
+            reload: true,
+        };
+        shell.update(&Action::ConfigChanged(change), &ctx);
+        assert!(shell.reload_pending, "not while the screen is open");
+        shell.update(&Action::Back, &ctx);
+        assert!(!shell.reload_pending);
     }
 
     fn render(shell: &mut Shell, ctx: &Ctx) -> String {
