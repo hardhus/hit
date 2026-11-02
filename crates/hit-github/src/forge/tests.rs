@@ -2,7 +2,10 @@
 //! rules.md): no real accounts, tokens or repositories.
 
 use hit_auth::Secret;
-use hit_core::{AccessHint, Host, model::CheckState};
+use hit_core::{
+    AccessHint, Host,
+    model::{CheckState, CloseReason, MergeMethod, ReviewVerdict},
+};
 use serde_json::{Value, json};
 use url::Url;
 use wiremock::{
@@ -640,9 +643,276 @@ async fn a_read_only_account_writes_nothing() {
         },
         FocusOptions::default(),
     );
-    let result = ItemActions::comment(&forge, &ItemRef::pull_request(rocket(), 7), "x").await;
-    assert!(matches!(result, Err(ForgeError::ReadOnly(_))));
+    let item = ItemRef::pull_request(rocket(), 7);
+    let refused = |result: Result<()>| assert!(matches!(result, Err(ForgeError::ReadOnly(_))));
+    refused(ItemActions::comment(&forge, &item, "x").await);
+    refused(ItemActions::review(&forge, &item, ReviewVerdict::Approve, "").await);
+    refused(ItemActions::merge(&forge, &item, MergeMethod::Squash).await);
+    refused(ItemActions::delete_branch(&forge, &item, "topic").await);
+    refused(ItemActions::set_open(&forge, &item, false, None).await);
     assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+/// A server that answers `POST`, `PUT`, `PATCH` and `DELETE` with success and
+/// remembers what it was asked.
+async fn write_server() -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(wiremock::matchers::any())
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(&server)
+        .await;
+    server
+}
+
+async fn the_only_request(server: &MockServer) -> (String, String, Value) {
+    let requests = server.received_requests().await.unwrap();
+    let [request] = requests.as_slice() else {
+        panic!("expected one request: {requests:?}");
+    };
+    let sent = serde_json::from_slice(&request.body).unwrap_or(Value::Null);
+    (
+        request.method.to_string(),
+        request.url.path().to_owned(),
+        sent,
+    )
+}
+
+#[tokio::test]
+async fn reviews_merges_and_closing_ask_for_the_right_thing() {
+    let pr = ItemRef::pull_request(rocket(), 7);
+    let issue = ItemRef::issue(rocket(), 8);
+
+    let server = write_server().await;
+    ItemActions::review(&default_forge(&server), &pr, ReviewVerdict::Approve, "ok")
+        .await
+        .unwrap();
+    let (verb, url, sent) = the_only_request(&server).await;
+    assert_eq!(
+        (verb.as_str(), url.as_str()),
+        ("POST", "/api/repos/acme/rocket/pulls/7/reviews")
+    );
+    assert_eq!(
+        (&sent["event"], &sent["body"]),
+        (&json!("APPROVE"), &json!("ok"))
+    );
+
+    let server = write_server().await;
+    ItemActions::review(
+        &default_forge(&server),
+        &pr,
+        ReviewVerdict::RequestChanges,
+        "fix",
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        the_only_request(&server).await.2["event"],
+        "REQUEST_CHANGES"
+    );
+
+    let server = write_server().await;
+    ItemActions::merge(&default_forge(&server), &pr, MergeMethod::Squash)
+        .await
+        .unwrap();
+    let (verb, url, sent) = the_only_request(&server).await;
+    assert_eq!(
+        (verb.as_str(), url.as_str()),
+        ("PUT", "/api/repos/acme/rocket/pulls/7/merge")
+    );
+    assert_eq!(sent["merge_method"], "squash");
+
+    let server = write_server().await;
+    ItemActions::delete_branch(&default_forge(&server), &pr, "me/topic")
+        .await
+        .unwrap();
+    let (verb, url, _) = the_only_request(&server).await;
+    assert_eq!(
+        (verb.as_str(), url.as_str()),
+        ("DELETE", "/api/repos/acme/rocket/git/refs/heads/me/topic")
+    );
+
+    let server = write_server().await;
+    ItemActions::set_open(&default_forge(&server), &pr, false, None)
+        .await
+        .unwrap();
+    let (verb, url, sent) = the_only_request(&server).await;
+    assert_eq!(
+        (verb.as_str(), url.as_str()),
+        ("PATCH", "/api/repos/acme/rocket/pulls/7")
+    );
+    assert_eq!(sent, json!({ "state": "closed" }));
+
+    let server = write_server().await;
+    ItemActions::set_open(
+        &default_forge(&server),
+        &issue,
+        false,
+        Some(CloseReason::NotPlanned),
+    )
+    .await
+    .unwrap();
+    let (_, url, sent) = the_only_request(&server).await;
+    assert_eq!(url, "/api/repos/acme/rocket/issues/8");
+    assert_eq!(
+        sent,
+        json!({ "state": "closed", "state_reason": "not_planned" })
+    );
+
+    let server = write_server().await;
+    ItemActions::set_open(&default_forge(&server), &issue, true, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        the_only_request(&server).await.2,
+        json!({ "state": "open" })
+    );
+}
+
+#[tokio::test]
+async fn a_strange_branch_name_is_never_put_in_an_address() {
+    let server = MockServer::start().await;
+    for branch in ["a?b", "a#b", "a b", "../../x"] {
+        let result = ItemActions::delete_branch(
+            &default_forge(&server),
+            &ItemRef::pull_request(rocket(), 7),
+            branch,
+        )
+        .await;
+        assert!(result.is_err(), "{branch}");
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_branch_already_gone_is_not_a_problem() {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .respond_with(ResponseTemplate::new(422).set_body_json(json!({
+            "message": "Reference does not exist"
+        })))
+        .mount(&server)
+        .await;
+    ItemActions::delete_branch(
+        &default_forge(&server),
+        &ItemRef::pull_request(rocket(), 7),
+        "topic",
+    )
+    .await
+    .unwrap();
+}
+
+fn merge_reply(status: &str, cross: bool) -> Value {
+    json!({ "repository": {
+        "mergeCommitAllowed": false,
+        "squashMergeAllowed": true,
+        "rebaseMergeAllowed": true,
+        "viewerDefaultMergeMethod": "MERGE",
+        "pullRequest": {
+            "state": "OPEN",
+            "isDraft": false,
+            "isCrossRepository": cross,
+            "mergeStateStatus": status,
+            "headRefName": "topic",
+            "baseRefName": "main"
+        }
+    }})
+}
+
+#[tokio::test]
+async fn merge_options_say_what_is_allowed_and_what_stands_in_the_way() {
+    let get = |status: &'static str, cross| async move {
+        let server = MockServer::start().await;
+        graphql_reply(&server, merge_reply(status, cross)).await;
+        ItemActions::merge_options(&default_forge(&server), &ItemRef::pull_request(rocket(), 7))
+            .await
+            .unwrap()
+    };
+
+    let clean = get("CLEAN", false).await;
+    assert_eq!(clean.allowed, [MergeMethod::Squash, MergeMethod::Rebase]);
+    assert_eq!(
+        clean.default,
+        MergeMethod::Squash,
+        "merge commits are off here"
+    );
+    assert_eq!(
+        (clean.blocked.as_deref(), clean.warning.as_deref()),
+        (None, None)
+    );
+    assert!(clean.can_delete_branch);
+
+    assert!(
+        get("DIRTY", false)
+            .await
+            .blocked
+            .unwrap()
+            .contains("conflicts")
+    );
+    assert!(get("BLOCKED", false).await.blocked.is_some());
+    let unstable = get("UNSTABLE", false).await;
+    assert!(unstable.blocked.is_none() && unstable.warning.is_some());
+    assert!(
+        !get("CLEAN", true).await.can_delete_branch,
+        "a fork's branch is not ours to delete: a same-named one here could be"
+    );
+}
+
+#[tokio::test]
+async fn failed_checks_run_again_for_the_pull_request_s_own_commit() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/repos/acme/rocket/pulls/7"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "head": { "sha": "abc123" }
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/repos/acme/rocket/actions/runs"))
+        .and(query_param("head_sha", "abc123"))
+        .and(query_param("status", "failure"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "workflow_runs": [{ "id": 11 }, { "id": 12 }]
+        })))
+        .mount(&server)
+        .await;
+    for id in [11, 12] {
+        Mock::given(method("POST"))
+            .and(path(format!(
+                "/api/repos/acme/rocket/actions/runs/{id}/rerun-failed-jobs"
+            )))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+    let count =
+        ItemActions::rerun_failed(&default_forge(&server), &ItemRef::pull_request(rocket(), 7))
+            .await
+            .unwrap();
+    assert_eq!(count, 2);
+}
+
+#[tokio::test]
+async fn no_failed_runs_is_said_plainly() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/repos/acme/rocket/pulls/7"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "head": { "sha": "abc123" }
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/repos/acme/rocket/actions/runs"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "workflow_runs": [] })))
+        .mount(&server)
+        .await;
+    let error =
+        ItemActions::rerun_failed(&default_forge(&server), &ItemRef::pull_request(rocket(), 7))
+            .await
+            .unwrap_err();
+    assert!(matches!(error, ForgeError::Rejected(_)));
 }
 
 #[tokio::test]

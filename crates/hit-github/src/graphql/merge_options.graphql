@@ -1,0 +1,18 @@
+# What is needed to offer a merge: what the repository allows and what stands
+# in the way of this pull request.
+query MergeOptions($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    mergeCommitAllowed
+    squashMergeAllowed
+    rebaseMergeAllowed
+    viewerDefaultMergeMethod
+    pullRequest(number: $number) {
+      state
+      isDraft
+      isCrossRepository
+      mergeStateStatus
+      headRefName
+      baseRefName
+    }
+  }
+}

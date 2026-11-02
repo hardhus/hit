@@ -14,17 +14,21 @@ use ratatui::{
 };
 use tokio::task::JoinHandle;
 
+use hit_core::model::ReviewVerdict;
+
 use crate::{
     Action, Ctx, DataEvent, Event, View,
-    action::Target,
+    action::{Purpose, Target},
     anim::Moment,
     keymap::typed_char,
-    markdown, sync,
+    markdown,
+    sync::{self, ItemOp},
     ui::{editor::Editor, popup::Popup},
 };
 
 pub struct ComposeView {
     target: Target,
+    purpose: Purpose,
     editor: Editor,
     preview: bool,
     preview_scroll: u16,
@@ -43,9 +47,10 @@ impl Drop for ComposeView {
 }
 
 impl ComposeView {
-    pub fn new(target: Target, draft: &str) -> Self {
+    pub fn new(target: Target, purpose: Purpose, draft: &str) -> Self {
         Self {
             target,
+            purpose,
             editor: Editor::new(draft),
             preview: false,
             preview_scroll: 0,
@@ -57,8 +62,13 @@ impl ComposeView {
     }
 
     fn send(&mut self, ctx: &Ctx) {
-        if self.editor.is_blank() {
-            self.error = Some("nothing to send yet".to_owned());
+        // An approval says enough by itself; everything else needs words.
+        let may_be_blank = self.purpose == Purpose::Review(ReviewVerdict::Approve);
+        if self.editor.is_blank() && !may_be_blank {
+            self.error = Some(match self.purpose {
+                Purpose::Comment => "nothing to send yet".to_owned(),
+                Purpose::Review(_) => "say what should change".to_owned(),
+            });
             return;
         }
         let Some(forge) = ctx.forges.by_account(&self.target.account) else {
@@ -67,10 +77,15 @@ impl ComposeView {
         };
         self.error = None;
         self.sending = true;
-        self.task = Some(sync::spawn_comment(
+        let text = self.editor.text();
+        let op = match self.purpose {
+            Purpose::Comment => ItemOp::Comment(text),
+            Purpose::Review(verdict) => ItemOp::Review(verdict, text),
+        };
+        self.task = Some(sync::spawn_item_op(
             Arc::clone(forge),
             self.target.clone(),
-            self.editor.text(),
+            op,
             ctx.sender(),
         ));
     }
@@ -166,7 +181,15 @@ impl View for ComposeView {
 
     fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) {
         let t = &ctx.theme;
-        let title = format!("comment on {}", self.target.item);
+        let title = match self.purpose {
+            Purpose::Comment => format!("comment on {}", self.target.item),
+            Purpose::Review(ReviewVerdict::Approve) => {
+                format!("approve {} · a comment is optional", self.target.item)
+            }
+            Purpose::Review(ReviewVerdict::RequestChanges) => {
+                format!("request changes on {}", self.target.item)
+            }
+        };
         let footer = if self.sending {
             "sending…"
         } else if self.preview {
@@ -256,7 +279,12 @@ mod tests {
             account: forge.account().clone(),
             item: ItemRef::pull_request(repo, 142),
         };
-        (ComposeView::new(target, ""), ctx, rx, forge)
+        (
+            ComposeView::new(target, Purpose::Comment, ""),
+            ctx,
+            rx,
+            forge,
+        )
     }
 
     fn type_text(view: &mut ComposeView, text: &str, ctx: &Ctx) {
@@ -313,6 +341,60 @@ mod tests {
         assert_eq!(view.editor.text(), "important words");
         assert!(view.error.as_deref().unwrap().starts_with("couldn't send"));
         assert!(!view.sending, "it can be tried again");
+    }
+
+    #[tokio::test]
+    async fn an_approval_may_be_blank_and_a_request_for_changes_may_not() {
+        let (view, ctx, mut rx, forge) = setup(MockOptions::instant());
+        let repo = view.target.item.repo.clone();
+        let target = Target {
+            account: view.target.account.clone(),
+            item: ItemRef::pull_request(repo, 145),
+        };
+
+        let mut changes = ComposeView::new(
+            target.clone(),
+            Purpose::Review(ReviewVerdict::RequestChanges),
+            "",
+        );
+        changes.handle_event(&ctrl('s'), &ctx);
+        assert!(!changes.sending);
+        assert!(changes.error.is_some());
+
+        let mut approve =
+            ComposeView::new(target.clone(), Purpose::Review(ReviewVerdict::Approve), "");
+        approve.handle_event(&ctrl('s'), &ctx);
+        assert!(approve.sending);
+        let action = done(&mut rx).await;
+        assert!(approve.update(&action, &ctx).is_some());
+        let detail = forge
+            .pull_requests()
+            .unwrap()
+            .get(&target.item)
+            .await
+            .unwrap();
+        assert_eq!(
+            detail.reviews.last().unwrap().state,
+            hit_core::model::ReviewState::Approved
+        );
+    }
+
+    #[tokio::test]
+    async fn the_forge_s_refusal_is_shown_as_it_is() {
+        // #142 is the demo user's own.
+        let (mut view, ctx, mut rx, _forge) = setup(MockOptions::instant());
+        view.purpose = Purpose::Review(ReviewVerdict::Approve);
+        view.handle_event(&ctrl('s'), &ctx);
+        let action = done(&mut rx).await;
+        assert!(view.update(&action, &ctx).is_none());
+        assert!(
+            view.error
+                .as_deref()
+                .unwrap()
+                .contains("your own pull request"),
+            "{:?}",
+            view.error
+        );
     }
 
     #[tokio::test]

@@ -12,10 +12,12 @@ use crate::{
     external_editor,
     keymap::Keymap,
     shell::Shell,
+    sync,
     terminal::{self, Term, TerminalGuard},
     ui::toast::Toasts,
     views::{
-        ActionMenu, ComposeView, DetailView, IssueView, LoginView, PullView, SettingsView, Welcome,
+        ActionMenu, ComposeView, DetailView, IssueView, LoginView, MergeView, PullView,
+        SettingsView, Welcome,
     },
 };
 
@@ -214,11 +216,30 @@ impl App {
                 }
             }
             Action::Redraw => {}
-            Action::OpenActions(ref target) => {
-                self.push(Box::new(ActionMenu::new(target.clone())));
+            Action::OpenActions(ref target, facts) => {
+                self.push(Box::new(ActionMenu::new(target.clone(), facts)));
                 return;
             }
-            Action::Compose(ref target) => {
+            Action::OpenMerge(ref target) => {
+                // In place of the menu that offered it.
+                self.views.pop();
+                self.push(Box::new(MergeView::new(target.clone())));
+                return;
+            }
+            Action::Perform(ref target, ref op) => {
+                self.views.pop();
+                if let Some(forge) = self.ctx.forges.by_account(&target.account) {
+                    sync::spawn_item_op(
+                        Arc::clone(forge),
+                        target.clone(),
+                        op.clone(),
+                        self.ctx.sender(),
+                    );
+                }
+                self.dirty = true;
+                return;
+            }
+            Action::Compose(ref target, purpose) => {
                 // In place of the menu that offered it.
                 self.views.pop();
                 let draft = self
@@ -227,7 +248,7 @@ impl App {
                     .get(&target.item)
                     .cloned()
                     .unwrap_or_default();
-                self.push(Box::new(ComposeView::new(target.clone(), &draft)));
+                self.push(Box::new(ComposeView::new(target.clone(), purpose, &draft)));
                 return;
             }
             Action::CloseCompose {
@@ -268,14 +289,26 @@ impl App {
                     self.toasts.push(toast.clone());
                 }
                 if let Action::Data(DataEvent::ActionDone {
-                    what,
-                    result: Ok(()),
+                    message,
+                    result,
                     target,
                 }) = &action
                 {
-                    self.ctx.drafts.remove(&target.item);
-                    self.toasts
-                        .push(Toast::success(format!("{what} on {}", target.item)));
+                    match result {
+                        Ok(()) => {
+                            self.ctx.drafts.remove(&target.item);
+                            self.toasts.push(Toast::success(message.clone()));
+                            sync::after_search_catches_up(self.ctx.sender());
+                        }
+                        // A box or the merge question says it itself.
+                        Err(e) if !self.views.last().is_some_and(|v| v.is_overlay()) => {
+                            self.toasts.push(Toast::error(format!(
+                                "couldn't change {}: {e}",
+                                target.item
+                            )));
+                        }
+                        Err(_) => {}
+                    }
                 }
                 let mut follow_ups = Vec::new();
                 for view in &mut self.views {

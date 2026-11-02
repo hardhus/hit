@@ -22,8 +22,9 @@ use hit_core::{
     diff::Diff,
     focus::{self, FocusItem, FocusSubject},
     model::{
-        Comment, Issue, IssueDetail, IssueState, Notification, NotificationId, PrState,
-        PullRequest, PullRequestDetail, Repo, User,
+        CheckState, CloseReason, Comment, Issue, IssueDetail, IssueState, MergeMethod,
+        MergeOptions, Mergeable, Notification, NotificationId, PrState, PullRequest,
+        PullRequestDetail, Repo, Review, ReviewDecision, ReviewState, ReviewVerdict, User,
     },
     query::{
         Cursor, IssueQuery, NotificationQuery, Page, PageRequest, PrQuery, Scope, Sort, StateFilter,
@@ -314,6 +315,149 @@ impl ItemActions for MockForge {
         }
         Ok(())
     }
+
+    async fn review(&self, item: &ItemRef, verdict: ReviewVerdict, body: &str) -> Result<()> {
+        self.network().await?;
+        let me = self.me().to_owned();
+        let mut data = self.data();
+        let detail = pull_mut(&mut data, item)?;
+        if detail.pr.author.login == me {
+            return Err(ForgeError::Rejected(
+                "Can not review your own pull request".to_owned(),
+            ));
+        }
+        if verdict == ReviewVerdict::RequestChanges && body.trim().is_empty() {
+            return Err(ForgeError::Rejected(
+                "Validation Failed: a body is required to request changes".to_owned(),
+            ));
+        }
+        let (state, decision) = match verdict {
+            ReviewVerdict::Approve => (ReviewState::Approved, ReviewDecision::Approved),
+            ReviewVerdict::RequestChanges => (
+                ReviewState::ChangesRequested,
+                ReviewDecision::ChangesRequested,
+            ),
+        };
+        detail.reviews.push(Review {
+            author: User::new(me.clone()),
+            state,
+            body: body.to_owned(),
+            submitted_at: Some(Timestamp::now()),
+        });
+        detail.pr.review_decision = Some(decision);
+        detail.pr.requested_reviewers.retain(|u| u.login != me);
+        Ok(())
+    }
+
+    async fn merge_options(&self, item: &ItemRef) -> Result<MergeOptions> {
+        self.network().await?;
+        let mut data = self.data();
+        let pr = &pull_mut(&mut data, item)?.pr;
+        let failing = pr.checks.is_some_and(|c| c.state == CheckState::Failure);
+        let blocked = if !pr.is_open() {
+            Some("it is no longer open")
+        } else if pr.is_draft() {
+            Some("it is still a draft")
+        } else if pr.mergeable == Some(Mergeable::Conflicting) {
+            Some("it has conflicts with the base branch")
+        } else if pr.review_decision == Some(ReviewDecision::ChangesRequested) {
+            Some("changes were requested")
+        } else {
+            None
+        };
+        Ok(MergeOptions {
+            allowed: vec![MergeMethod::Squash, MergeMethod::Merge, MergeMethod::Rebase],
+            default: MergeMethod::Squash,
+            blocked: blocked.map(str::to_owned),
+            warning: failing.then(|| "some checks are failing".to_owned()),
+            head_ref: pr.head_ref.clone(),
+            base_ref: pr.base_ref.clone(),
+            can_delete_branch: true,
+        })
+    }
+
+    async fn merge(&self, item: &ItemRef, _method: MergeMethod) -> Result<()> {
+        self.network().await?;
+        let mut data = self.data();
+        let pr = &mut pull_mut(&mut data, item)?.pr;
+        if pr.mergeable == Some(Mergeable::Conflicting) {
+            return Err(ForgeError::Rejected(
+                "Pull Request is not mergeable".to_owned(),
+            ));
+        }
+        pr.state = PrState::Merged;
+        pr.merged_at = Some(Timestamp::now());
+        pr.closed_at = pr.merged_at;
+        Ok(())
+    }
+
+    async fn delete_branch(&self, _item: &ItemRef, _branch: &str) -> Result<()> {
+        self.network().await
+    }
+
+    async fn set_open(
+        &self,
+        item: &ItemRef,
+        open: bool,
+        reason: Option<CloseReason>,
+    ) -> Result<()> {
+        self.network().await?;
+        let now = Timestamp::now();
+        let mut data = self.data();
+        match item.kind {
+            ItemKind::PullRequest => {
+                let pr = &mut pull_mut(&mut data, item)?.pr;
+                pr.state = if open { PrState::Open } else { PrState::Closed };
+                pr.closed_at = (!open).then_some(now);
+            }
+            ItemKind::Issue => {
+                let issue = &mut data
+                    .issues
+                    .iter_mut()
+                    .find(|d| &d.issue.reference == item)
+                    .ok_or(ForgeError::NotFound)?
+                    .issue;
+                issue.state = if open {
+                    IssueState::Open
+                } else {
+                    IssueState::Closed(reason)
+                };
+                issue.closed_at = (!open).then_some(now);
+            }
+        }
+        Ok(())
+    }
+
+    async fn rerun_failed(&self, item: &ItemRef) -> Result<usize> {
+        self.network().await?;
+        let mut data = self.data();
+        let detail = pull_mut(&mut data, item)?;
+        let mut count = 0;
+        for check in &mut detail.checks {
+            if check.state == CheckState::Failure {
+                check.state = CheckState::Pending;
+                count += 1;
+            }
+        }
+        if count == 0 {
+            return Err(ForgeError::Rejected(
+                "no failed GitHub Actions runs on this pull request".to_owned(),
+            ));
+        }
+        if let Some(summary) = &mut detail.pr.checks {
+            summary.state = CheckState::Pending;
+            summary.pending += summary.failed;
+            summary.failed = 0;
+        }
+        Ok(count)
+    }
+}
+
+fn pull_mut<'a>(data: &'a mut Data, item: &ItemRef) -> Result<&'a mut PullRequestDetail> {
+    data.pulls
+        .iter_mut()
+        .find(|d| &d.pr.reference == item)
+        .ok_or(ForgeError::NotFound)
 }
 
 #[async_trait]

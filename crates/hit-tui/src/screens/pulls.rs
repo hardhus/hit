@@ -36,6 +36,7 @@ use crate::{
         chips::{self, bold},
         list::{ItemList, ListState, Row},
     },
+    views::Facts,
 };
 
 const ENTRANCE: Duration = Duration::from_millis(700);
@@ -924,12 +925,16 @@ impl Tab for PullsTab {
         entering || gliding || loading
     }
 
-    fn action_target(&self, ctx: &Ctx) -> Option<Target> {
+    fn action_target(&self, ctx: &Ctx) -> Option<(Target, Facts)> {
         let (account, pr) = self.selected_pr(ctx)?;
-        Some(Target {
-            account,
-            item: pr.reference,
-        })
+        let facts = Facts::of_pull(&pr, &account.login);
+        Some((
+            Target {
+                account,
+                item: pr.reference,
+            },
+            facts,
+        ))
     }
 
     fn shown(&mut self) {

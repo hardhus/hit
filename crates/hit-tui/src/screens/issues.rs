@@ -37,6 +37,7 @@ use crate::{
         list::{ItemList, ListState, Row},
         picker::{Picker, PickerEvent, PickerItem},
     },
+    views::Facts,
 };
 
 const ENTRANCE: Duration = Duration::from_millis(700);
@@ -1011,12 +1012,16 @@ impl Tab for IssuesTab {
         entering || gliding || popping || loading
     }
 
-    fn action_target(&self, ctx: &Ctx) -> Option<Target> {
+    fn action_target(&self, ctx: &Ctx) -> Option<(Target, Facts)> {
         let (account, issue) = self.selected_issue(ctx)?;
-        Some(Target {
-            account,
-            item: issue.reference,
-        })
+        let facts = Facts::of_issue(&issue, &account.login);
+        Some((
+            Target {
+                account,
+                item: issue.reference,
+            },
+            facts,
+        ))
     }
 
     fn shown(&mut self) {

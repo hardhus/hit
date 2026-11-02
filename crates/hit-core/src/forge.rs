@@ -15,8 +15,8 @@ use crate::{
     diff::Diff,
     focus::FocusItem,
     model::{
-        Issue, IssueDetail, Notification, NotificationId, PullRequest, PullRequestDetail, Repo,
-        RepoCounts,
+        CloseReason, Issue, IssueDetail, MergeMethod, MergeOptions, Notification, NotificationId,
+        PullRequest, PullRequestDetail, Repo, RepoCounts, ReviewVerdict,
     },
     query::{IssueQuery, NotificationQuery, Page, PageRequest, PrQuery, Scope},
 };
@@ -100,6 +100,17 @@ pub trait Forge: Send + Sync {
 pub trait ItemActions: Send + Sync {
     /// Adds a comment to a pull request or an issue.
     async fn comment(&self, item: &ItemRef, body: &str) -> Result<()>;
+    /// Submits a review. `body` may be empty when approving.
+    async fn review(&self, item: &ItemRef, verdict: ReviewVerdict, body: &str) -> Result<()>;
+    async fn merge_options(&self, item: &ItemRef) -> Result<MergeOptions>;
+    async fn merge(&self, item: &ItemRef, method: MergeMethod) -> Result<()>;
+    /// Deletes a merged pull request's branch from its repository.
+    async fn delete_branch(&self, item: &ItemRef, branch: &str) -> Result<()>;
+    /// Closes or reopens. `reason` only means something for closing an issue.
+    async fn set_open(&self, item: &ItemRef, open: bool, reason: Option<CloseReason>)
+    -> Result<()>;
+    /// Runs a pull request's failed checks again; how many runs that was.
+    async fn rerun_failed(&self, item: &ItemRef) -> Result<usize>;
 }
 
 #[async_trait]

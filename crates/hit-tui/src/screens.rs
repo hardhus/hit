@@ -18,7 +18,7 @@ pub use issues::IssuesTab;
 pub use pulls::{PullsTab, pr_icon, pr_status_spans};
 pub use repos::ReposTab;
 
-use crate::{Action, Ctx, DataEvent, Event, action::Target, keymap::Command};
+use crate::{Action, Ctx, DataEvent, Event, action::Target, keymap::Command, views::Facts};
 
 /// What Action Required says about each item, for the repository views: the
 /// forge's searches know things an item's own fields do not (mentions, team
@@ -138,7 +138,7 @@ pub trait Tab {
     }
 
     /// What the action menu would act on.
-    fn action_target(&self, ctx: &Ctx) -> Option<Target> {
+    fn action_target(&self, ctx: &Ctx) -> Option<(Target, Facts)> {
         let _ = ctx;
         None
     }

@@ -11,10 +11,10 @@ use futures::future::try_join_all;
 use hit_cache::{Cache, Vault};
 use hit_config::ConfigEdit;
 use hit_core::{
-    Forge, ForgeError, ItemRef, Notifications, RepoRef, Timestamp,
+    Forge, ForgeError, ItemActions, ItemRef, Notifications, RepoRef, Timestamp,
     model::{
-        CheckState, Issue, IssueDetail, Notification, NotificationId, PullRequest,
-        PullRequestDetail, Repo, RepoCounts,
+        CheckState, CloseReason, Issue, IssueDetail, MergeMethod, Notification, NotificationId,
+        PullRequest, PullRequestDetail, Repo, RepoCounts, ReviewVerdict,
     },
     query::{Cursor, IssueQuery, NotificationQuery, Page, PageRequest, PrQuery, Scope},
 };
@@ -354,28 +354,132 @@ pub fn is_stale(at: Timestamp, minutes: u32) -> bool {
     minutes > 0 && Timestamp::now().duration_since(at).as_secs() >= i64::from(minutes) * 60
 }
 
-/// Sends a comment. It finishes even if the screen that asked goes away: once
-/// on its way, leaving does not unsend it.
-pub fn spawn_comment(
+/// Something to change on the forge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ItemOp {
+    Comment(String),
+    Review(ReviewVerdict, String),
+    Merge {
+        method: MergeMethod,
+        /// The branch to delete afterwards.
+        delete_branch: Option<String>,
+    },
+    SetOpen {
+        open: bool,
+        reason: Option<CloseReason>,
+    },
+    RerunFailed,
+}
+
+impl ItemOp {
+    /// Does it, and says what happened.
+    async fn run(
+        &self,
+        actions: &dyn ItemActions,
+        item: &ItemRef,
+        tx: &mpsc::UnboundedSender<Action>,
+    ) -> Result<String, ForgeError> {
+        Ok(match self {
+            Self::Comment(body) => {
+                actions.comment(item, body).await?;
+                format!("commented on {item}")
+            }
+            Self::Review(verdict, body) => {
+                actions.review(item, *verdict, body).await?;
+                match verdict {
+                    ReviewVerdict::Approve => format!("approved {item}"),
+                    ReviewVerdict::RequestChanges => format!("asked for changes on {item}"),
+                }
+            }
+            Self::Merge {
+                method,
+                delete_branch,
+            } => {
+                actions.merge(item, *method).await?;
+                if let Some(branch) = delete_branch
+                    && let Err(e) = actions.delete_branch(item, branch).await
+                {
+                    // Merged is merged; this is only a leftover to mention.
+                    let _ = tx.send(Action::Toast(Toast::warning(format!(
+                        "couldn't delete {branch}: {e}"
+                    ))));
+                }
+                format!("merged {item}")
+            }
+            Self::SetOpen { open: true, .. } => {
+                actions.set_open(item, true, None).await?;
+                format!("reopened {item}")
+            }
+            Self::SetOpen {
+                open: false,
+                reason,
+            } => {
+                actions.set_open(item, false, *reason).await?;
+                format!("closed {item} · x then o reopens it")
+            }
+            Self::RerunFailed => {
+                let runs = actions.rerun_failed(item).await?;
+                format!(
+                    "running {runs} failed {} again on {item}",
+                    if runs == 1 { "workflow" } else { "workflows" }
+                )
+            }
+        })
+    }
+}
+
+/// Carries out `op`. It finishes even if the screen that asked goes away: once
+/// on its way, leaving does not undo it.
+pub fn spawn_item_op(
     forge: Arc<dyn Forge>,
     target: Target,
-    body: String,
+    op: ItemOp,
+    tx: mpsc::UnboundedSender<Action>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let outcome = match forge.actions() {
+            Some(actions) => op.run(actions, &target.item, &tx).await,
+            None => Err(ForgeError::Unsupported("changing things")),
+        };
+        let (message, result) = match outcome {
+            Ok(message) => (message, Ok(())),
+            Err(e) => {
+                tracing::warn!(error = %e, item = %target.item, "could not change it");
+                (String::new(), Err(e))
+            }
+        };
+        let _ = tx.send(Action::Data(DataEvent::ActionDone {
+            target,
+            message,
+            result,
+        }));
+    })
+}
+
+/// What stands in the way of merging.
+pub fn spawn_merge_options(
+    forge: Arc<dyn Forge>,
+    target: Target,
     tx: mpsc::UnboundedSender<Action>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let result = match forge.actions() {
-            Some(actions) => actions.comment(&target.item, &body).await,
-            None => Err(ForgeError::Unsupported("comments")),
+            Some(actions) => actions.merge_options(&target.item).await,
+            None => Err(ForgeError::Unsupported("merging")),
         };
-        if let Err(e) = &result {
-            tracing::warn!(error = %e, item = %target.item, "could not comment");
-        }
-        let _ = tx.send(Action::Data(DataEvent::ActionDone {
-            target,
-            what: "commented",
-            result,
-        }));
+        let _ = tx.send(Action::Data(DataEvent::MergeOptions { target, result }));
     })
+}
+
+/// How long a forge's search may lag behind a change.
+const SEARCH_CATCH_UP: Duration = Duration::from_secs(4);
+
+/// Asks for one more look once the forge's search has caught up.
+pub fn after_search_catches_up(tx: mpsc::UnboundedSender<Action>) {
+    tokio::spawn(async move {
+        tokio::time::sleep(SEARCH_CATCH_UP).await;
+        let _ = tx.send(Action::Data(DataEvent::Settled));
+    });
 }
 
 /// Pull requests and issues per page.
