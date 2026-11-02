@@ -158,6 +158,16 @@ impl GithubLogin {
         let api = Api::new(self.http.clone(), self.host.clone(), token.clone(), options);
         let viewer = verify(&api).await?;
 
+        // Signing in again (a new token) must not quietly lift read-only.
+        let was_read_only = Accounts::load(&self.accounts_path).is_ok_and(|accounts| {
+            accounts
+                .iter()
+                .any(|a| a.host == *self.host.host() && a.login == viewer.login && a.read_only)
+        });
+        if was_read_only {
+            api.lock_read_only();
+        }
+
         let account = Account {
             host: self.host.host().clone(),
             login: viewer.login,
@@ -168,7 +178,7 @@ impl GithubLogin {
             },
             token_kind: kind,
             scopes: viewer.scopes.unwrap_or_default(),
-            read_only: self.settings.read_only,
+            read_only: self.settings.read_only || was_read_only,
             added_at: Timestamp::now(),
         };
 
@@ -321,6 +331,36 @@ mod tests {
         assert_eq!(store.get(&key).unwrap().unwrap().expose(), "ghp_abc");
         let accounts = Accounts::load(&dir.path().join("accounts.toml")).unwrap();
         assert_eq!(accounts.get(&key), Some(&account));
+    }
+
+    #[tokio::test]
+    async fn signing_in_again_does_not_lift_read_only() {
+        let server = MockServer::start().await;
+        mount_user(&server, 200).await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("accounts.toml");
+        let store = Arc::new(MemoryStore::default());
+        let base = Url::parse(&server.uri()).unwrap();
+        let login = |read_only| {
+            GithubLogin::new(
+                hit_auth::client().unwrap(),
+                GithubHost::for_tests("github.com", &base),
+                Some("client123".into()),
+                LoginSettings {
+                    read_only,
+                    ..settings()
+                },
+                Arc::clone(&store) as Arc<dyn hit_auth::TokenStore>,
+                path.clone(),
+            )
+        };
+        let token = || Secret::new("gho_abc").unwrap();
+
+        login(true).with_token(token(), None).await.unwrap();
+        let (account, forge) = login(false).with_token(token(), None).await.unwrap();
+
+        assert!(account.read_only);
+        assert!(hit_core::Forge::is_read_only(&forge));
     }
 
     #[tokio::test]

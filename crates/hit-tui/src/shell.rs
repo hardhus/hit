@@ -5,7 +5,7 @@ mod palette;
 
 use std::time::Duration;
 
-use hit_core::{ForgeKind, RepoRef, query::Scope as RepoScope};
+use hit_core::{AccountId, ForgeKind, RepoRef, query::Scope as RepoScope};
 use ratatui::{
     Frame,
     layout::Rect,
@@ -132,6 +132,18 @@ impl Shell {
                 self.toasts.push(Toast::info("pick a repository"));
             }
             Command::Settings => return Some(Action::OpenSettings),
+            Command::SignIn => {
+                if Self::can_sign_in_here(ctx) {
+                    return Some(Action::OpenLogin);
+                }
+                self.toasts.push(Toast::info(
+                    "no account to sign in again here; use `hit auth login`",
+                ));
+            }
+            // The banner's key; this is otherwise only used inside diffs.
+            Command::ScrollRight if Self::can_sign_in_here(ctx) => {
+                return Some(Action::OpenLogin);
+            }
             Command::CycleAccount if ctx.multi_account() => return Some(Action::CycleAccount),
             Command::CycleAccount => {
                 self.toasts
@@ -170,6 +182,75 @@ impl Shell {
         self.tabs.iter().flat_map(|t| t.jump_targets()).collect()
     }
 
+    /// Accounts whose token GitHub rejected.
+    fn signed_out(ctx: &Ctx) -> Vec<&AccountId> {
+        ctx.forges
+            .iter()
+            .filter(|forge| forge.health().token_rejected)
+            .map(|forge| forge.account())
+            .collect()
+    }
+
+    /// Whether the sign-in screen can repair one of them.
+    fn can_sign_in_here(ctx: &Ctx) -> bool {
+        ctx.login.as_ref().is_some_and(|login| {
+            Self::signed_out(ctx)
+                .iter()
+                .any(|account| &account.host == login.host())
+        })
+    }
+
+    /// One line above the list: the data below it is getting old and only the
+    /// user can fix that.
+    fn signed_out_banner(ctx: &Ctx) -> Option<Line<'static>> {
+        let accounts = Self::signed_out(ctx);
+        if accounts.is_empty() {
+            return None;
+        }
+        let names: Vec<String> = accounts
+            .iter()
+            .map(|account| format!("@{}", account.login))
+            .collect();
+        let fix = if Self::can_sign_in_here(ctx) {
+            format!(
+                "press {} to sign in again",
+                ctx.keymap.short(Command::ScrollRight)
+            )
+        } else {
+            "run `hit auth login`".to_owned()
+        };
+        let t = &ctx.theme;
+        Some(
+            Line::from(format!(
+                " ✗ {} signed out: GitHub rejected the token · {fix} · below is the last known data",
+                names.join(", ")
+            ))
+            .style(bold(t.selection).bg(t.danger)),
+        )
+    }
+
+    /// The tightest request budget of any account, once it is low.
+    fn rate_limit_span(ctx: &Ctx) -> Option<Span<'static>> {
+        let t = &ctx.theme;
+        let rate = ctx
+            .forges
+            .iter()
+            .filter_map(|forge| forge.health().rate_limit)
+            .min_by_key(|rate| rate.remaining)?;
+        let until = rate
+            .reset_at
+            .map(|at| format!(" · back at {}", chips::clock(at)))
+            .unwrap_or_default();
+        Some(if rate.is_exhausted() {
+            Span::styled(format!("rate limit reached{until} "), bold(t.danger))
+        } else {
+            Span::styled(
+                format!("rate limit low: {} left{until} ", rate.remaining),
+                bold(t.warning),
+            )
+        })
+    }
+
     fn render_status(&self, frame: &mut Frame, area: Rect, ctx: &Ctx) {
         let t = &ctx.theme;
         let mut left = vec![Span::raw(" ")];
@@ -179,6 +260,7 @@ impl Shell {
         frame.render_widget(Paragraph::new(Line::from(left)), area);
 
         let mut right = Vec::new();
+        right.extend(Self::rate_limit_span(ctx));
         if ctx.forges.is_demo() {
             right.push(Span::styled(
                 " DEMO ",
@@ -214,7 +296,13 @@ impl Shell {
         for forge in ctx.forges.iter() {
             let account = forge.account();
             let shown = ctx.shows(account);
-            let style = if shown {
+            let signed_out = forge.health().token_rejected;
+            if signed_out {
+                spans.push(Span::styled("✗ ", bold(t.danger)));
+            }
+            let style = if signed_out {
+                bold(t.danger)
+            } else if shown {
                 bold(ctx.account_color(account))
             } else {
                 Style::new().fg(t.muted).add_modifier(Modifier::DIM)
@@ -380,6 +468,12 @@ impl View for Shell {
                 None => "showing all accounts".to_owned(),
             })),
             Action::ConfigChanged(change) if change.reload => self.reload_pending = true,
+            // Signed in again: fresh loops with the new token, nothing else moves.
+            Action::AccountAdded(_) => {
+                for tab in &mut self.tabs {
+                    tab.mount(ctx);
+                }
+            }
             Action::Back if self.reload_pending => {
                 self.reload_pending = false;
                 for tab in &mut self.tabs {
@@ -414,7 +508,24 @@ impl View for Shell {
     fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) {
         let t = &ctx.theme;
         self.toasts.prune();
-        let regions = self.layout.regions(area);
+        let mut regions = self.layout.regions(area);
+        if let Some(banner) = Self::signed_out_banner(ctx) {
+            frame.render_widget(
+                Paragraph::new(banner),
+                Rect {
+                    x: area.x,
+                    y: regions.list.y,
+                    width: area.width,
+                    height: 1,
+                },
+            );
+            regions.list.y += 1;
+            regions.list.height = regions.list.height.saturating_sub(1);
+            if let Some(preview) = &mut regions.preview {
+                preview.y += 1;
+                preview.height = preview.height.saturating_sub(1);
+            }
+        }
 
         let specs: Vec<TabSpec> = self
             .tabs
@@ -536,6 +647,94 @@ mod tests {
 
     fn key(code: KeyCode) -> Event {
         Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    struct Rejected {
+        account: hit_core::AccountId,
+        health: hit_core::Health,
+    }
+
+    impl hit_core::Forge for Rejected {
+        fn kind(&self) -> ForgeKind {
+            ForgeKind::GitHub
+        }
+
+        fn account(&self) -> &hit_core::AccountId {
+            &self.account
+        }
+
+        fn health(&self) -> hit_core::Health {
+            self.health
+        }
+    }
+
+    fn with_health(health: hit_core::Health) -> Ctx {
+        let mut forges = Forges::new();
+        forges.add(Arc::new(Rejected {
+            account: hit_core::AccountId::new(hit_core::Host::new("example.test"), "someone"),
+            health,
+        }));
+        Ctx::for_tests(Services {
+            forges,
+            ..Services::default()
+        })
+        .0
+    }
+
+    fn screen(shell: &mut Shell, ctx: &Ctx) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(160, 24)).unwrap();
+        terminal
+            .draw(|frame| shell.render(frame, frame.area(), ctx))
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .chunks(160)
+            .map(|row| row.iter().map(|c| c.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[tokio::test]
+    async fn a_rejected_token_is_impossible_to_miss_and_says_what_to_do() {
+        let ctx = with_health(hit_core::Health {
+            token_rejected: true,
+            rate_limit: None,
+        });
+        let text = screen(&mut Shell::new(Vec::new()), &ctx);
+        assert!(text.contains("✗ @someone"), "{text}");
+        assert!(
+            text.contains("signed out: GitHub rejected the token"),
+            "{text}"
+        );
+        assert!(text.contains("hit auth login"), "no sign-in here: {text}");
+    }
+
+    #[tokio::test]
+    async fn a_healthy_account_shows_no_banner_or_limit() {
+        let ctx = with_health(hit_core::Health::default());
+        let text = screen(&mut Shell::new(Vec::new()), &ctx);
+        assert!(!text.contains("signed out"), "{text}");
+        assert!(!text.contains("rate limit"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_low_or_spent_rate_limit_shows_up() {
+        let low = |remaining| {
+            with_health(hit_core::Health {
+                token_rejected: false,
+                rate_limit: Some(hit_core::RateLimit {
+                    remaining,
+                    limit: 5000,
+                    reset_at: None,
+                }),
+            })
+        };
+        let text = screen(&mut Shell::new(Vec::new()), &low(312));
+        assert!(text.contains("rate limit low: 312 left"), "{text}");
+        let text = screen(&mut Shell::new(Vec::new()), &low(0));
+        assert!(text.contains("rate limit reached"), "{text}");
     }
 
     #[tokio::test]

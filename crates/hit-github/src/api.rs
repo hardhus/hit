@@ -9,11 +9,12 @@ use std::{
         Arc, Mutex, MutexGuard, PoisonError,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use hit_auth::Secret;
-use hit_core::{AccessHint, ForgeError, Timestamp};
+use hit_core::{AccessHint, ForgeError, Health, RateLimit, Timestamp};
+use jiff::SignedDuration;
 use reqwest::{
     Client, Method, RequestBuilder, Response, StatusCode,
     header::{self, HeaderMap, HeaderValue},
@@ -109,8 +110,109 @@ pub struct Api {
     options: ApiOptions,
     /// Read-only was turned on while hit runs; shared by clones.
     locked: Arc<AtomicBool>,
+    standing: Arc<Mutex<Standing>>,
     /// Validators and bodies of recent conditional `GET`s, by URL.
     conditional: Arc<Mutex<HashMap<String, Stored>>>,
+}
+
+/// A rejected token is not tried again for this long. It stops pointless
+/// requests, and the occasional try notices a token that works again.
+const REJECTED_RECHECK: Duration = Duration::from_secs(10 * 60);
+/// When a secondary limit does not say how long to wait.
+const SECONDARY_LIMIT_WAIT: i64 = 60;
+
+/// GitHub counts REST and GraphQL requests separately.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pool {
+    Rest,
+    Graphql,
+}
+
+/// What the responses so far say about this account.
+#[derive(Debug, Default)]
+struct Standing {
+    rejected_at: Option<Instant>,
+    rest: Option<RateLimit>,
+    graphql: Option<RateLimit>,
+    /// A secondary limit: nothing is sent until then.
+    blocked_until: Option<Timestamp>,
+}
+
+impl Standing {
+    fn pool(&self, pool: Pool) -> Option<RateLimit> {
+        match pool {
+            Pool::Rest => self.rest,
+            Pool::Graphql => self.graphql,
+        }
+    }
+
+    /// Why nothing should be sent right now.
+    fn refusal(&self, pool: Pool, now: Timestamp) -> Option<ForgeError> {
+        if self
+            .rejected_at
+            .is_some_and(|at| at.elapsed() < REJECTED_RECHECK)
+        {
+            return Some(ForgeError::Unauthorized);
+        }
+        if let Some(until) = self.blocked_until.filter(|until| *until > now) {
+            return Some(ForgeError::RateLimited {
+                reset_at: Some(until),
+            });
+        }
+        self.pool(pool)
+            .filter(RateLimit::is_exhausted)
+            .and_then(|limit| limit.reset_at)
+            .filter(|reset| *reset > now)
+            .map(|reset| ForgeError::RateLimited {
+                reset_at: Some(reset),
+            })
+    }
+
+    fn observe(&mut self, pool: Pool, status: StatusCode, headers: &HeaderMap) {
+        if status == StatusCode::UNAUTHORIZED {
+            self.rejected_at = Some(Instant::now());
+        } else if status.is_success() || status == StatusCode::NOT_MODIFIED {
+            self.rejected_at = None;
+        }
+        let number = |name: &str| {
+            headers
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse::<i64>().ok())
+        };
+        let (Some(remaining), Some(limit)) =
+            (number("x-ratelimit-remaining"), number("x-ratelimit-limit"))
+        else {
+            return;
+        };
+        let rate = RateLimit {
+            remaining: u32::try_from(remaining).unwrap_or(0),
+            limit: u32::try_from(limit).unwrap_or(0),
+            reset_at: number("x-ratelimit-reset").and_then(|s| Timestamp::from_second(s).ok()),
+        };
+        match pool {
+            Pool::Rest => self.rest = Some(rate),
+            Pool::Graphql => self.graphql = Some(rate),
+        }
+    }
+
+    /// The tightest budget, once under a tenth of its size.
+    fn low_rate_limit(&self, now: Timestamp) -> Option<RateLimit> {
+        if let Some(until) = self.blocked_until.filter(|until| *until > now) {
+            return Some(RateLimit {
+                remaining: 0,
+                limit: 0,
+                reset_at: Some(until),
+            });
+        }
+        [self.rest, self.graphql]
+            .into_iter()
+            .flatten()
+            // Reset already: the numbers are old news.
+            .filter(|rate| rate.reset_at.is_none_or(|reset| reset > now))
+            .filter(|rate| u64::from(rate.remaining) * 10 < u64::from(rate.limit))
+            .min_by_key(|rate| rate.remaining)
+    }
 }
 
 /// Upper bound on remembered conditional responses.
@@ -161,6 +263,7 @@ impl Api {
             token,
             options,
             locked: Arc::default(),
+            standing: Arc::default(),
             conditional: Arc::default(),
         }
     }
@@ -174,6 +277,48 @@ impl Api {
             read_only: self.options.read_only || self.locked.load(Ordering::Relaxed),
             ..self.options
         }
+    }
+
+    pub fn health(&self) -> Health {
+        let standing = self.lock_standing();
+        Health {
+            token_rejected: standing.rejected_at.is_some(),
+            rate_limit: standing.low_rate_limit(Timestamp::now()),
+        }
+    }
+
+    fn lock_standing(&self) -> MutexGuard<'_, Standing> {
+        self.standing.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Sends `request` unless the forge has already said not to, and learns
+    /// from the answer. Every request goes through here.
+    async fn dispatch(&self, pool: Pool, request: RequestBuilder) -> Result<Response, ForgeError> {
+        if let Some(refusal) = self.lock_standing().refusal(pool, Timestamp::now()) {
+            return Err(refusal);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|e| ForgeError::Network(e.without_url().to_string()))?;
+        self.lock_standing()
+            .observe(pool, response.status(), response.headers());
+        Ok(response)
+    }
+
+    /// Remembers a limit the forge only reported as an error.
+    fn note_limit(&self, error: ForgeError) -> ForgeError {
+        let ForgeError::RateLimited { reset_at } = error else {
+            return error;
+        };
+        let until = reset_at.or_else(|| {
+            Timestamp::now()
+                .checked_add(SignedDuration::from_secs(SECONDARY_LIMIT_WAIT))
+                .ok()
+        });
+        let mut standing = self.lock_standing();
+        standing.blocked_until = until;
+        ForgeError::RateLimited { reset_at: until }
     }
 
     /// Refuses writes from now on; see [`hit_core::Forge::lock_read_only`].
@@ -273,13 +418,15 @@ impl Api {
                 }
                 Ok(data)
             }
-            (None, errors) => Err(errors
-                .into_iter()
-                .next()
-                .map(GraphqlError::into_forge_error)
-                .unwrap_or_else(|| {
-                    ForgeError::InvalidResponse("graphql: no data and no errors".to_owned())
-                })),
+            (None, errors) => Err(self.note_limit(
+                errors
+                    .into_iter()
+                    .next()
+                    .map(GraphqlError::into_forge_error)
+                    .unwrap_or_else(|| {
+                        ForgeError::InvalidResponse("graphql: no data and no errors".to_owned())
+                    }),
+            )),
         }
     }
 
@@ -300,10 +447,7 @@ impl Api {
                 request = request.header(header::IF_MODIFIED_SINCE, modified.clone());
             }
         }
-        let response = request
-            .send()
-            .await
-            .map_err(|e| ForgeError::Network(e.without_url().to_string()))?;
+        let response = self.dispatch(Pool::Rest, request).await?;
 
         if response.status() == StatusCode::NOT_MODIFIED
             && let Some(stored) = stored
@@ -317,7 +461,7 @@ impl Api {
             });
         }
 
-        let response = check(response).await?;
+        let response = check(response).await.map_err(|e| self.note_limit(e))?;
         let headers = response.headers().clone();
         let body = response
             .bytes()
@@ -381,15 +525,17 @@ impl Api {
         accept: &'static str,
         body: Option<&serde_json::Value>,
     ) -> Result<Response, ForgeError> {
+        let pool = if url == *self.host.graphql() {
+            Pool::Graphql
+        } else {
+            Pool::Rest
+        };
         let mut request = self.request(method, url, accept)?;
         if let Some(body) = body {
             request = request.json(body);
         }
-        let response = request
-            .send()
-            .await
-            .map_err(|e| ForgeError::Network(e.without_url().to_string()))?;
-        check(response).await
+        let response = self.dispatch(pool, request).await?;
+        check(response).await.map_err(|e| self.note_limit(e))
     }
 
     /// Joins `path` onto the API base and refuses anything that would leave
@@ -466,10 +612,23 @@ fn map_error(status: StatusCode, headers: &HeaderMap, message: String) -> ForgeE
                 || header("retry-after").is_some()
                 || status == StatusCode::TOO_MANY_REQUESTS
             {
-                let reset_at = header("x-ratelimit-reset")
+                let wait = header("retry-after")
+                    .and_then(|v| v.parse::<i64>().ok())
+                    .and_then(|s| {
+                        Timestamp::now()
+                            .checked_add(SignedDuration::from_secs(s))
+                            .ok()
+                    });
+                let reset = header("x-ratelimit-reset")
                     .and_then(|v| v.parse::<i64>().ok())
                     .and_then(|s| Timestamp::from_second(s).ok());
-                return ForgeError::RateLimited { reset_at };
+                return ForgeError::RateLimited {
+                    reset_at: wait.or(reset),
+                };
+            }
+            // GitHub's abuse protection answers a plain 403 sometimes.
+            if message.to_lowercase().contains("secondary rate limit") {
+                return ForgeError::RateLimited { reset_at: None };
             }
             if let Some(hint) = header("x-github-sso").and_then(parse_sso) {
                 return ForgeError::Forbidden {
@@ -615,6 +774,144 @@ mod tests {
         assert!(server.received_requests().await.unwrap().is_empty());
     }
 
+    fn limited(remaining: &str, reset: i64) -> ResponseTemplate {
+        ResponseTemplate::new(200)
+            .set_body_json(serde_json::json!({}))
+            .insert_header("x-ratelimit-limit", "5000")
+            .insert_header("x-ratelimit-remaining", remaining)
+            .insert_header("x-ratelimit-reset", reset.to_string().as_str())
+    }
+
+    fn in_an_hour() -> i64 {
+        Timestamp::now().as_second() + 3600
+    }
+
+    #[tokio::test]
+    async fn a_rejected_token_stops_the_requests() {
+        let server = MockServer::start().await;
+        Mock::given(path("/api/user"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+        let api = api(&server, ApiOptions::default()).await;
+        assert!(!api.health().token_rejected);
+
+        assert_eq!(api.get("user").await.unwrap_err(), ForgeError::Unauthorized);
+        assert!(api.health().token_rejected);
+        for _ in 0..3 {
+            assert_eq!(api.get("user").await.unwrap_err(), ForgeError::Unauthorized);
+        }
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            1,
+            "only the first one reached GitHub"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rejected_token_is_tried_again_later_and_can_recover() {
+        let server = MockServer::start().await;
+        Mock::given(path("/api/user"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&server)
+            .await;
+        let api = api(&server, ApiOptions::default()).await;
+        api.lock_standing().rejected_at = Instant::now().checked_sub(REJECTED_RECHECK);
+
+        api.get("user").await.unwrap();
+
+        assert!(!api.health().token_rejected);
+    }
+
+    #[tokio::test]
+    async fn an_exhausted_budget_waits_for_its_reset() {
+        let server = MockServer::start().await;
+        Mock::given(path("/api/rest"))
+            .respond_with(limited("0", in_an_hour()))
+            .mount(&server)
+            .await;
+        Mock::given(path("/api/graphql"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "data": {} }))
+                    .insert_header("x-ratelimit-limit", "5000")
+                    .insert_header("x-ratelimit-remaining", "4000"),
+            )
+            .mount(&server)
+            .await;
+        let api = api(&server, ApiOptions::default()).await;
+
+        api.get("rest").await.unwrap();
+        assert!(matches!(
+            api.get("rest").await.unwrap_err(),
+            ForgeError::RateLimited { reset_at: Some(_) }
+        ));
+        let requests = server.received_requests().await.unwrap().len();
+        assert_eq!(requests, 1, "the second one was not sent");
+        assert!(api.health().rate_limit.unwrap().is_exhausted());
+
+        // GraphQL has its own budget.
+        api.graphql::<serde_json::Value>("query { a }", serde_json::json!({}))
+            .await
+            .unwrap();
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_budget_that_has_reset_is_used_again() {
+        let server = MockServer::start().await;
+        Mock::given(path("/api/rest"))
+            .respond_with(limited("0", Timestamp::now().as_second() - 10))
+            .mount(&server)
+            .await;
+        let api = api(&server, ApiOptions::default()).await;
+        api.get("rest").await.unwrap();
+        api.get("rest").await.unwrap();
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
+        assert_eq!(api.health().rate_limit, None);
+    }
+
+    #[tokio::test]
+    async fn the_limit_is_only_mentioned_when_low() {
+        let server = MockServer::start().await;
+        Mock::given(path("/api/plenty"))
+            .respond_with(limited("501", in_an_hour()))
+            .mount(&server)
+            .await;
+        Mock::given(path("/api/low"))
+            .respond_with(limited("499", in_an_hour()))
+            .mount(&server)
+            .await;
+        let api = api(&server, ApiOptions::default()).await;
+        api.get("plenty").await.unwrap();
+        assert_eq!(api.health().rate_limit, None);
+        api.get("low").await.unwrap();
+        assert_eq!(api.health().rate_limit.unwrap().remaining, 499);
+    }
+
+    #[tokio::test]
+    async fn a_secondary_limit_pauses_everything() {
+        let server = MockServer::start().await;
+        Mock::given(path("/api/busy"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "message": "You have exceeded a secondary rate limit."
+            })))
+            .mount(&server)
+            .await;
+        let api = api(&server, ApiOptions::default()).await;
+        assert!(matches!(
+            api.get("busy").await.unwrap_err(),
+            ForgeError::RateLimited { reset_at: Some(_) }
+        ));
+        assert!(matches!(
+            api.graphql::<serde_json::Value>("query { a }", serde_json::json!({}))
+                .await
+                .unwrap_err(),
+            ForgeError::RateLimited { .. }
+        ));
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+
     #[tokio::test]
     async fn turning_read_only_on_works_right_away() {
         let server = MockServer::start().await;
@@ -670,23 +967,27 @@ mod tests {
             .respond_with(ResponseTemplate::new(404))
             .mount(&server)
             .await;
-        let api = api(&server, ApiOptions::default()).await;
+        // A new Api for each: errors are remembered, see `Standing`.
+        let fresh = || api(&server, ApiOptions::default());
 
         assert_eq!(
-            api.get("unauth").await.unwrap_err(),
+            fresh().await.get("unauth").await.unwrap_err(),
             ForgeError::Unauthorized
         );
         assert!(matches!(
-            api.get("limited").await.unwrap_err(),
+            fresh().await.get("limited").await.unwrap_err(),
             ForgeError::RateLimited { reset_at: Some(_) }
         ));
         assert!(matches!(
-            api.get("sso").await.unwrap_err(),
+            fresh().await.get("sso").await.unwrap_err(),
             ForgeError::Forbidden {
                 hint: Some(AccessHint::SsoRequired { .. }),
                 ..
             }
         ));
-        assert_eq!(api.get("missing").await.unwrap_err(), ForgeError::NotFound);
+        assert_eq!(
+            fresh().await.get("missing").await.unwrap_err(),
+            ForgeError::NotFound
+        );
     }
 }

@@ -31,7 +31,7 @@ use crate::{
     anim::{Moment, Tween},
     browser,
     keymap::{Command, typed_char},
-    sync::{self, Loaded},
+    sync::{self, Listing, Loaded},
     ui::{
         chips::{self, bold},
         list::{ItemList, ListState, Row},
@@ -40,6 +40,8 @@ use crate::{
 };
 
 const ENTRANCE: Duration = Duration::from_millis(700);
+/// How close to the end of a list its next page is asked for.
+const LOAD_MORE_WITHIN: usize = 10;
 const CURSOR_GLIDE: Duration = Duration::from_millis(90);
 
 /// The ready-made views `f` cycles through.
@@ -101,11 +103,13 @@ impl View {
             query.scope = scope.clone();
             query
         };
-        let mut queries = vec![scoped(self.query(me))];
+        let mut queries = Vec::new();
         if self == Self::Involved && scope.repo().is_some() {
             queries.push(scoped(Self::Assigned.query(me)));
             queries.push(scoped(Self::Created.query(me)));
         }
+        // Last: this is the one that continues when the user scrolls.
+        queries.push(scoped(self.query(me)));
         queries
     }
 }
@@ -154,8 +158,9 @@ enum Slot<'a> {
 
 #[derive(Default)]
 struct Data {
-    items: Option<Loaded<Arc<Vec<Issue>>>>,
+    items: Option<Loaded<Arc<Listing<Issue>>>>,
     error: Option<ForgeError>,
+    loading_more: bool,
 }
 
 #[derive(Default)]
@@ -323,6 +328,60 @@ impl IssuesTab {
         items
     }
 
+    /// Near the end of the list, asks for what comes next.
+    fn load_more(&mut self, ctx: &Ctx) {
+        if !self.filter.is_empty()
+            || !self.labels.is_empty()
+            || self.rows(ctx).len().saturating_sub(self.list.selected) > LOAD_MORE_WITHIN
+        {
+            return;
+        }
+        let view = self.current();
+        for forge in ctx.scoped_forges().filter(|f| ctx.shows(f.account())) {
+            let account = forge.account().clone();
+            let Some(data) = self.data.get_mut(&(account.clone(), view.key())) else {
+                continue;
+            };
+            // A cached list's cursor may be stale; wait for the fresh one.
+            let Some(cursor) = data
+                .items
+                .as_ref()
+                .filter(|loaded| loaded.fresh)
+                .and_then(|loaded| loaded.value.next.clone())
+            else {
+                continue;
+            };
+            if data.loading_more || data.error.is_some() {
+                continue;
+            }
+            let Some(query) = view.queries(&account.login, &ctx.scope).pop() else {
+                continue;
+            };
+            data.loading_more = true;
+            self.tasks.push(sync::spawn_more_issues(
+                Arc::clone(forge),
+                view.key(),
+                query,
+                cursor,
+                ctx.sender(),
+            ));
+        }
+    }
+
+    /// `12 shown`, or `50 / 312` while there is more to come.
+    fn count_text(&self, shown: usize, ctx: &Ctx) -> String {
+        let total: u32 = self
+            .shown_data(ctx)
+            .filter_map(|(_, data)| data.items.as_ref()?.value.total)
+            .sum();
+        let loading = self.shown_data(ctx).any(|(_, data)| data.loading_more);
+        if self.filter.is_empty() && total as usize > shown {
+            format!("{shown} / {total}{} ", if loading { " …" } else { "" })
+        } else {
+            format!("{shown} shown ")
+        }
+    }
+
     fn is_grouped(&self, ctx: &Ctx) -> bool {
         ctx.scope.repo().is_some() && self.current() == View::Involved
     }
@@ -456,7 +515,7 @@ impl IssuesTab {
         frame.render_widget(Paragraph::new(Line::from(spans)), area);
         frame.render_widget(
             Paragraph::new(Span::styled(
-                format!("{shown} shown "),
+                self.count_text(shown, ctx),
                 Style::new().fg(t.muted),
             ))
             .alignment(Alignment::Right),
@@ -482,7 +541,7 @@ impl IssuesTab {
         {
             vec![
                 Line::from(Span::styled("couldn't load issues", bold(t.danger))),
-                Line::from(Span::styled(e.to_string(), muted)),
+                Line::from(Span::styled(chips::problem(e), muted)),
             ]
         } else if !self.filter.is_empty() || !self.labels.is_empty() {
             vec![Line::from(Span::styled(
@@ -609,13 +668,25 @@ impl Tab for IssuesTab {
         let rows = self.rows(ctx);
         let page = ListState::page(self.list_height) as isize;
         match command {
-            Command::Down => self.list.move_by(1, &rows),
+            Command::Down => {
+                self.list.move_by(1, &rows);
+                self.load_more(ctx);
+            }
             Command::Up => self.list.move_by(-1, &rows),
             Command::Top => self.list.top(&rows),
-            Command::Bottom => self.list.bottom(&rows),
-            Command::NextGroup => self.list.jump_group(true, &rows),
+            Command::Bottom => {
+                self.list.bottom(&rows);
+                self.load_more(ctx);
+            }
+            Command::NextGroup => {
+                self.list.jump_group(true, &rows);
+                self.load_more(ctx);
+            }
             Command::PrevGroup => self.list.jump_group(false, &rows),
-            Command::PageDown => self.list.move_by(page, &rows),
+            Command::PageDown => {
+                self.list.move_by(page, &rows);
+                self.load_more(ctx);
+            }
             Command::PageUp => self.list.move_by(-page, &rows),
             Command::Open => {
                 let (account, issue) = self.selected_issue(ctx)?;
@@ -707,6 +778,33 @@ impl Tab for IssuesTab {
     }
 
     fn update(&mut self, action: &Action, ctx: &Ctx) {
+        if let Action::Data(DataEvent::IssuesMore {
+            account,
+            scope,
+            view,
+            cursor,
+            result,
+        }) = action
+        {
+            if *scope != ctx.scope {
+                return;
+            }
+            if let Some(data) = self.data.get_mut(&(account.clone(), *view)) {
+                data.loading_more = false;
+                if let Some(loaded) = data
+                    .items
+                    .as_mut()
+                    .filter(|loaded| loaded.value.next.as_ref() == Some(cursor))
+                {
+                    match result {
+                        Ok(page) => Arc::make_mut(&mut loaded.value)
+                            .extend(page.clone(), |issue| &issue.reference),
+                        Err(e) => data.error = Some(e.clone()),
+                    }
+                }
+            }
+            self.restore_selection(ctx);
+        }
         if let Action::Data(DataEvent::Issues {
             account,
             scope,
@@ -801,7 +899,7 @@ impl Tab for IssuesTab {
             ));
             if let Some(e) = self.shown_data(ctx).find_map(|(_, d)| d.error.as_ref()) {
                 spans.push(Span::styled(
-                    format!("  ·  ! couldn't refresh ({e})"),
+                    format!("  ·  ! couldn't refresh ({})", chips::problem(e)),
                     Style::new().fg(t.warning),
                 ));
             }

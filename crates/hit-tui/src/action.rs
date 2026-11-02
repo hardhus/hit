@@ -8,10 +8,14 @@ use hit_core::{
     model::{
         Issue, IssueDetail, Notification, NotificationId, PullRequest, PullRequestDetail, Repo,
     },
-    query::Scope,
+    query::{Cursor, Page, Scope},
 };
 
-use crate::{highlight::HighlightedDiff, keymap::Command, sync::Loaded};
+use crate::{
+    highlight::HighlightedDiff,
+    keymap::Command,
+    sync::{Listing, Loaded},
+};
 
 /// Something the app should do. Views return actions from input handling, and
 /// background tasks send them through [`crate::Ctx::sender`].
@@ -77,13 +81,28 @@ pub enum DataEvent {
         account: AccountId,
         scope: Scope,
         view: &'static str,
-        result: Result<Loaded<Arc<Vec<PullRequest>>>, ForgeError>,
+        result: Result<Loaded<Arc<Listing<PullRequest>>>, ForgeError>,
+    },
+    /// Another page of a list; `cursor` is where it was asked from.
+    PullsMore {
+        account: AccountId,
+        scope: Scope,
+        view: &'static str,
+        cursor: Cursor,
+        result: Result<Page<PullRequest>, ForgeError>,
     },
     Issues {
         account: AccountId,
         scope: Scope,
         view: &'static str,
-        result: Result<Loaded<Arc<Vec<Issue>>>, ForgeError>,
+        result: Result<Loaded<Arc<Listing<Issue>>>, ForgeError>,
+    },
+    IssuesMore {
+        account: AccountId,
+        scope: Scope,
+        view: &'static str,
+        cursor: Cursor,
+        result: Result<Page<Issue>, ForgeError>,
     },
     Repos {
         account: AccountId,

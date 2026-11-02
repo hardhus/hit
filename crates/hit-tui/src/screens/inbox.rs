@@ -384,8 +384,14 @@ impl InboxTab {
         }
         frame.render_widget(Paragraph::new(Line::from(spans)), area);
         frame.render_widget(
-            Paragraph::new(Span::styled(format!("{shown} shown "), muted))
-                .alignment(Alignment::Right),
+            Paragraph::new(Span::styled(
+                format!(
+                    "{shown}{} shown ",
+                    if shown >= sync::INBOX_LIMIT { "+" } else { "" }
+                ),
+                muted,
+            ))
+            .alignment(Alignment::Right),
             area,
         );
     }
@@ -410,7 +416,7 @@ impl InboxTab {
         } else if let Some(e) = error.filter(|_| data.iter().all(|d| d.items.is_none())) {
             vec![
                 Line::from(Span::styled("couldn't load notifications", bold(t.danger))),
-                Line::from(Span::styled(e.to_string(), Style::new().fg(t.muted))),
+                Line::from(Span::styled(chips::problem(e), Style::new().fg(t.muted))),
             ]
         } else if self.filters_active() {
             vec![
@@ -832,7 +838,8 @@ impl Tab for InboxTab {
             } else if let Some(e) = data.iter().find_map(|d| d.error.as_ref()) {
                 spans.push(Span::styled(
                     format!(
-                        "! couldn't refresh ({e}) · data from {}",
+                        "! couldn't refresh ({}) · data from {}",
+                        chips::problem(e),
                         sync::ago(loaded.fetched_at)
                     ),
                     Style::new().fg(t.warning),

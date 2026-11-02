@@ -144,6 +144,10 @@ impl Forge for GithubForge {
         Some(self)
     }
 
+    fn health(&self) -> hit_core::Health {
+        self.api.health()
+    }
+
     fn is_read_only(&self) -> bool {
         self.api.options().read_only
     }
@@ -248,6 +252,7 @@ impl PullRequests for GithubForge {
         ]);
         let connection = self.search(q, page).await?;
         let next = next_cursor(&connection);
+        let total = connection.issue_count;
         let items = connection
             .nodes
             .into_iter()
@@ -257,7 +262,7 @@ impl PullRequests for GithubForge {
                 _ => None,
             })
             .collect();
-        Ok(Page { items, next })
+        Ok(Page { items, next, total })
     }
 
     async fn get(&self, pr: &ItemRef) -> Result<PullRequestDetail> {
@@ -318,6 +323,7 @@ impl Issues for GithubForge {
         ]);
         let connection = self.search(q, page).await?;
         let next = next_cursor(&connection);
+        let total = connection.issue_count;
         let items = connection
             .nodes
             .into_iter()
@@ -327,7 +333,7 @@ impl Issues for GithubForge {
                 _ => None,
             })
             .collect();
-        Ok(Page { items, next })
+        Ok(Page { items, next, total })
     }
 
     async fn get(&self, issue: &ItemRef) -> Result<IssueDetail> {
@@ -388,7 +394,11 @@ impl Notifications for GithubForge {
             .into_iter()
             .map(|n| n.into_model(self.api.host()))
             .collect();
-        Ok(Page { items, next })
+        Ok(Page {
+            items,
+            next,
+            total: None,
+        })
     }
 
     fn poll_interval(&self) -> Option<std::time::Duration> {
@@ -568,6 +578,7 @@ impl Repositories for GithubForge {
         Ok(Page {
             items: raw.into_iter().map(|r| r.into_model(self.host())).collect(),
             next,
+            total: None,
         })
     }
 
@@ -600,6 +611,7 @@ impl Repositories for GithubForge {
                 .map(|node| node.into_model(self.host()))
                 .collect(),
             next,
+            total: None,
         })
     }
 }

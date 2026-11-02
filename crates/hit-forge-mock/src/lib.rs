@@ -405,7 +405,11 @@ fn paginate<T>(items: Vec<T>, page: &PageRequest) -> Result<Page<T>> {
     let end = start.saturating_add(per_page).min(total);
     let next = (end < total).then(|| Cursor(end.to_string()));
     let items = items.into_iter().skip(start).take(per_page).collect();
-    Ok(Page { items, next })
+    Ok(Page {
+        items,
+        next,
+        total: u32::try_from(total).ok(),
+    })
 }
 
 #[cfg(test)]

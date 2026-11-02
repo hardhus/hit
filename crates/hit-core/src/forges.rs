@@ -18,6 +18,19 @@ impl Forges {
         self.forges.push(forge);
     }
 
+    /// Adds `forge`, or puts it in place of the same account's old one (a new
+    /// sign-in brings a new token).
+    pub fn upsert(&mut self, forge: Arc<dyn Forge>) {
+        match self
+            .forges
+            .iter_mut()
+            .find(|f| f.account() == forge.account())
+        {
+            Some(existing) => *existing = forge,
+            None => self.forges.push(forge),
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.forges.is_empty()
     }

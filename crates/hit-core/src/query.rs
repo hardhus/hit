@@ -121,10 +121,16 @@ pub struct Page<T> {
     pub items: Vec<T>,
     /// `None` on the last page.
     pub next: Option<Cursor>,
+    /// How many there are in all, when the forge says.
+    pub total: Option<u32>,
 }
 
 impl<T> Page<T> {
     pub fn last(items: Vec<T>) -> Self {
-        Self { items, next: None }
+        Self {
+            items,
+            next: None,
+            total: None,
+        }
     }
 }
