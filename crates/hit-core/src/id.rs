@@ -176,12 +176,12 @@ mod tests {
 
     #[test]
     fn parses_owner_and_name() {
-        let repo = RepoRef::parse(host(), "hardhus/hit").unwrap();
+        let repo = RepoRef::parse(host(), "acme/rocket").unwrap();
         assert_eq!(
             (repo.owner.as_str(), repo.name.as_str()),
-            ("hardhus", "hit")
+            ("acme", "rocket")
         );
-        assert_eq!(repo.to_string(), "hardhus/hit");
+        assert_eq!(repo.to_string(), "acme/rocket");
     }
 
     #[test]
