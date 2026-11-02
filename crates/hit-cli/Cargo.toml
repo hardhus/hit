@@ -1,6 +1,9 @@
 [package]
 name = "hit-cli"
 description = "A keyboard-driven terminal UI for GitHub (other forges planned)"
+readme = "../../README.md"
+keywords = ["github", "tui", "terminal", "cli", "pull-request"]
+categories = ["command-line-utilities"]
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
