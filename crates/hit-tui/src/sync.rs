@@ -5,13 +5,17 @@
 //! how old it is. Loops end when their task is aborted (the view went away
 //! or the user asked to refresh).
 
-use std::{future::Future, sync::Arc, time::Duration};
+use std::{collections::HashSet, future::Future, sync::Arc, time::Duration};
 
+use futures::future::try_join_all;
 use hit_cache::{Cache, Vault};
 use hit_core::{
-    Forge, ForgeError, ItemRef, Notifications, Timestamp,
-    model::{Issue, IssueDetail, Notification, NotificationId, PullRequest, PullRequestDetail},
-    query::{IssueQuery, NotificationQuery, PageRequest, PrQuery, Scope},
+    Forge, ForgeError, ItemRef, Notifications, RepoRef, Timestamp,
+    model::{
+        Issue, IssueDetail, Notification, NotificationId, PullRequest, PullRequestDetail, Repo,
+        RepoCounts,
+    },
+    query::{IssueQuery, NotificationQuery, Page, PageRequest, PrQuery, Scope},
 };
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::{sync::mpsc, task::JoinHandle};
@@ -34,6 +38,23 @@ const MAX_UNREAD_PAGES: usize = 10;
 
 const FOCUS_KEY: &str = "focus:all";
 const UNREAD_KEY: &str = "unread:all";
+
+/// A cache key that keeps a repository's data apart from everything else.
+fn scoped_key(base: &str, scope: &Scope) -> String {
+    match scope {
+        Scope::All => base.to_owned(),
+        Scope::Repo(repo) => format!("{base}@{repo}"),
+    }
+}
+
+/// Pages of overlapping queries as one list without repeats; an item keeps
+/// its copy from the first query that found it.
+fn merged<T>(pages: Vec<Page<T>>, id: impl Fn(&T) -> &ItemRef) -> Vec<T> {
+    let mut seen = HashSet::new();
+    let mut items: Vec<T> = pages.into_iter().flat_map(|page| page.items).collect();
+    items.retain(|item| seen.insert(id(item).clone()));
+    items
+}
 
 /// The account's encryption context, or `None` (no caching) when the forge
 /// offers no local key.
@@ -104,7 +125,10 @@ async fn load<T, F, Fut>(
                 fresh: true,
             }));
         }
-        Err(e) => send(Err(e)),
+        Err(e) => {
+            tracing::warn!(error = %e, key, "could not refresh");
+            send(Err(e));
+        }
     }
 }
 
@@ -112,12 +136,14 @@ async fn load<T, F, Fut>(
 pub fn spawn_focus(
     forge: Arc<dyn Forge>,
     cache: Option<Arc<Cache>>,
+    scope: Scope,
     every: Option<Duration>,
     tx: mpsc::UnboundedSender<Action>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let store = store_for(cache, forge.as_ref());
         let account = forge.account().clone();
+        let key = scoped_key(FOCUS_KEY, &scope);
         let send = |result: Result<Loaded<Vec<_>>, ForgeError>| {
             let result = result.map(|l| Loaded {
                 value: Arc::new(l.value),
@@ -126,6 +152,7 @@ pub fn spawn_focus(
             });
             let _ = tx.send(Action::Data(DataEvent::Focus {
                 account: account.clone(),
+                scope: scope.clone(),
                 result,
             }));
         };
@@ -134,11 +161,11 @@ pub fn spawn_focus(
             let _ = tx.send(Action::Data(DataEvent::Refreshing(account.clone())));
             let fetch = || async {
                 match forge.focus() {
-                    Some(focus) => focus.items(&Scope::All).await,
+                    Some(focus) => focus.items(&scope).await,
                     None => Err(ForgeError::Unsupported("Action Required")),
                 }
             };
-            load(&store, FOCUS_KEY, first, fetch, &send).await;
+            load(&store, &key, first, fetch, &send).await;
             first = false;
             match every {
                 Some(every) => tokio::time::sleep(every).await,
@@ -152,6 +179,7 @@ pub fn spawn_focus(
 pub fn spawn_unread(
     forge: Arc<dyn Forge>,
     cache: Option<Arc<Cache>>,
+    scope: Scope,
     poll: bool,
     tx: mpsc::UnboundedSender<Action>,
 ) -> JoinHandle<()> {
@@ -161,9 +189,11 @@ pub fn spawn_unread(
         };
         let store = store_for(cache, forge.as_ref());
         let account = forge.account().clone();
+        let key = scoped_key(UNREAD_KEY, &scope);
         let send = |result| {
             let _ = tx.send(Action::Data(DataEvent::UnreadCount {
                 account: account.clone(),
+                scope: scope.clone(),
                 result,
             }));
         };
@@ -171,11 +201,11 @@ pub fn spawn_unread(
         loop {
             let fetch = || async {
                 match forge.notifications() {
-                    Some(notifications) => count_unread(notifications).await,
+                    Some(notifications) => count_unread(notifications, &scope).await,
                     None => Ok(0),
                 }
             };
-            load(&store, UNREAD_KEY, first, fetch, &send).await;
+            load(&store, &key, first, fetch, &send).await;
             first = false;
             if !poll {
                 break;
@@ -189,8 +219,12 @@ pub fn spawn_unread(
     })
 }
 
-async fn count_unread(notifications: &dyn Notifications) -> Result<usize, ForgeError> {
+async fn count_unread(
+    notifications: &dyn Notifications,
+    scope: &Scope,
+) -> Result<usize, ForgeError> {
     let query = NotificationQuery {
+        scope: scope.clone(),
         unread_only: true,
         ..NotificationQuery::default()
     };
@@ -215,6 +249,7 @@ const INBOX_PAGES: usize = 4;
 pub fn spawn_inbox(
     forge: Arc<dyn Forge>,
     cache: Option<Arc<Cache>>,
+    scope: Scope,
     unread_only: bool,
     poll: bool,
     tx: mpsc::UnboundedSender<Action>,
@@ -225,11 +260,14 @@ pub fn spawn_inbox(
         }
         let store = store_for(cache, forge.as_ref());
         let account = forge.account().clone();
-        let key = if unread_only {
-            "inbox:unread"
-        } else {
-            "inbox:all"
-        };
+        let key = scoped_key(
+            if unread_only {
+                "inbox:unread"
+            } else {
+                "inbox:all"
+            },
+            &scope,
+        );
         let send = |result: Result<Loaded<Vec<Notification>>, ForgeError>| {
             let result = result.map(|l| Loaded {
                 value: Arc::new(l.value),
@@ -238,6 +276,7 @@ pub fn spawn_inbox(
             });
             let _ = tx.send(Action::Data(DataEvent::Notifications {
                 account: account.clone(),
+                scope: scope.clone(),
                 unread_only,
                 result,
             }));
@@ -246,11 +285,11 @@ pub fn spawn_inbox(
         loop {
             let fetch = || async {
                 match forge.notifications() {
-                    Some(notifications) => fetch_inbox(notifications, unread_only).await,
+                    Some(notifications) => fetch_inbox(notifications, &scope, unread_only).await,
                     None => Ok(Vec::new()),
                 }
             };
-            load(&store, key, first, fetch, &send).await;
+            load(&store, &key, first, fetch, &send).await;
             first = false;
             if !poll {
                 break;
@@ -266,9 +305,11 @@ pub fn spawn_inbox(
 
 async fn fetch_inbox(
     notifications: &dyn Notifications,
+    scope: &Scope,
     unread_only: bool,
 ) -> Result<Vec<Notification>, ForgeError> {
     let query = NotificationQuery {
+        scope: scope.clone(),
         unread_only,
         ..NotificationQuery::default()
     };
@@ -320,15 +361,17 @@ pub fn spawn_pulls(
     forge: Arc<dyn Forge>,
     cache: Option<Arc<Cache>>,
     view: &'static str,
-    query: PrQuery,
+    queries: Vec<PrQuery>,
     tx: mpsc::UnboundedSender<Action>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let store = store_for(cache, forge.as_ref());
         let account = forge.account().clone();
+        let scope = queries.first().map(|q| q.scope.clone()).unwrap_or_default();
         let send = |result: Result<Loaded<Vec<PullRequest>>, ForgeError>| {
             let _ = tx.send(Action::Data(DataEvent::Pulls {
                 account: account.clone(),
+                scope: scope.clone(),
                 view,
                 result: result.map(|l| Loaded {
                     value: Arc::new(l.value),
@@ -339,14 +382,27 @@ pub fn spawn_pulls(
         };
         let fetch = || async {
             match forge.pull_requests() {
-                Some(pulls) => pulls
-                    .list(&query, &PageRequest::first(50))
-                    .await
-                    .map(|page| page.items),
+                Some(pulls) => {
+                    let page = PageRequest::first(50);
+                    try_join_all(queries.iter().map(|query| pulls.list(query, &page)))
+                        .await
+                        .map(|mut pages| {
+                            // Only the search knows about requests to a team.
+                            for (query, page) in queries.iter().zip(&mut pages) {
+                                if query.reviewer.as_deref() == Some(account.login.as_str()) {
+                                    for pr in &mut page.items {
+                                        pr.review_requested_of_viewer = true;
+                                    }
+                                }
+                            }
+                            merged(pages, |pr| &pr.reference)
+                        })
+                }
                 None => Err(ForgeError::Unsupported("pull requests")),
             }
         };
-        load(&store, &format!("pulls:{view}"), true, fetch, &send).await;
+        let key = scoped_key(&format!("pulls:{view}"), &scope);
+        load(&store, &key, true, fetch, &send).await;
     })
 }
 
@@ -355,15 +411,17 @@ pub fn spawn_issues(
     forge: Arc<dyn Forge>,
     cache: Option<Arc<Cache>>,
     view: &'static str,
-    query: IssueQuery,
+    queries: Vec<IssueQuery>,
     tx: mpsc::UnboundedSender<Action>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let store = store_for(cache, forge.as_ref());
         let account = forge.account().clone();
+        let scope = queries.first().map(|q| q.scope.clone()).unwrap_or_default();
         let send = |result: Result<Loaded<Vec<Issue>>, ForgeError>| {
             let _ = tx.send(Action::Data(DataEvent::Issues {
                 account: account.clone(),
+                scope: scope.clone(),
                 view,
                 result: result.map(|l| Loaded {
                     value: Arc::new(l.value),
@@ -374,14 +432,127 @@ pub fn spawn_issues(
         };
         let fetch = || async {
             match forge.issues() {
-                Some(issues) => issues
-                    .list(&query, &PageRequest::first(50))
-                    .await
-                    .map(|page| page.items),
+                Some(issues) => {
+                    let page = PageRequest::first(50);
+                    try_join_all(queries.iter().map(|query| issues.list(query, &page)))
+                        .await
+                        .map(|pages| merged(pages, |issue| &issue.reference))
+                }
                 None => Err(ForgeError::Unsupported("issues")),
             }
         };
-        load(&store, &format!("issues:{view}"), true, fetch, &send).await;
+        let key = scoped_key(&format!("issues:{view}"), &scope);
+        load(&store, &key, true, fetch, &send).await;
+    })
+}
+
+const REPOS_KEY: &str = "repos:mine";
+const REPOS_SHOWN: u16 = 100;
+/// Open counts are slow: short pages, so the top of the list fills in first.
+const REPO_COUNTS_PER_PAGE: u16 = 25;
+const REPO_COUNTS_PAGES: usize = 4;
+
+/// Counts from the last run stand in until the new ones arrive.
+fn keep_known_counts(repos: &mut [Repo], known: &[Repo]) {
+    for repo in repos.iter_mut().filter(|r| r.open_prs.is_none()) {
+        if let Some(old) = known.iter().find(|old| old.reference == repo.reference) {
+            repo.open_prs = old.open_prs;
+            repo.open_issues = old.open_issues;
+        }
+    }
+}
+
+fn apply_counts(repos: &mut [Repo], counts: &[RepoCounts]) {
+    for count in counts {
+        if let Some(repo) = repos.iter_mut().find(|r| r.reference == count.reference) {
+            repo.open_prs = Some(count.open_prs);
+            repo.open_issues = Some(count.open_issues);
+        }
+    }
+}
+
+/// The account's repositories: the list as soon as it is here, then open
+/// counts as they come, so slow counting never holds the list back. `pinned` (the repository hit was opened on)
+/// is added when the list does not have it, e.g. someone else's project.
+pub fn spawn_repos(
+    forge: Arc<dyn Forge>,
+    cache: Option<Arc<Cache>>,
+    pinned: Option<RepoRef>,
+    tx: mpsc::UnboundedSender<Action>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let store = store_for(cache, forge.as_ref());
+        let account = forge.account().clone();
+        let send = |result: Result<Loaded<Vec<Repo>>, ForgeError>| {
+            let _ = tx.send(Action::Data(DataEvent::Repos {
+                account: account.clone(),
+                result: result.map(|l| Loaded {
+                    value: Arc::new(l.value),
+                    fetched_at: l.fetched_at,
+                    fresh: l.fresh,
+                }),
+            }));
+        };
+        let Some(repositories) = forge.repositories() else {
+            send(Err(ForgeError::Unsupported("repositories")));
+            return;
+        };
+        let known = cached::<Vec<Repo>>(&store, REPOS_KEY).await;
+        if let Some(hit) = &known {
+            send(Ok(hit.clone()));
+        }
+
+        let mut repos = match repositories
+            .list_mine(&PageRequest::first(REPOS_SHOWN))
+            .await
+        {
+            Ok(page) => page.items,
+            Err(e) => {
+                tracing::warn!(error = %e, key = REPOS_KEY, "could not refresh");
+                send(Err(e));
+                return;
+            }
+        };
+        if let Some(pinned) = pinned.as_ref().filter(|r| r.host == account.host)
+            && !repos.iter().any(|r| &r.reference == pinned)
+            && let Ok(repo) = repositories.get(pinned).await
+        {
+            repos.push(repo);
+        }
+        if let Some(known) = &known {
+            keep_known_counts(&mut repos, &known.value);
+        }
+        let fresh = |repos: &[Repo]| {
+            Ok(Loaded {
+                value: repos.to_vec(),
+                fetched_at: Timestamp::now(),
+                fresh: true,
+            })
+        };
+        send(fresh(&repos));
+        save(&store, REPOS_KEY, repos.clone()).await;
+
+        let mut page = PageRequest::first(REPO_COUNTS_PER_PAGE);
+        for _ in 0..REPO_COUNTS_PAGES {
+            match repositories.open_counts(&page).await {
+                Ok(counts) => {
+                    if !counts.items.is_empty() {
+                        apply_counts(&mut repos, &counts.items);
+                        send(fresh(&repos));
+                    }
+                    match counts.next {
+                        Some(cursor) => page = PageRequest::after(cursor, REPO_COUNTS_PER_PAGE),
+                        None => break,
+                    }
+                }
+                // The list is what matters; it stays, with the counts it has.
+                Err(e) => {
+                    tracing::warn!(error = %e, "could not load open counts");
+                    break;
+                }
+            }
+        }
+        save(&store, REPOS_KEY, repos).await;
     })
 }
 
@@ -502,6 +673,7 @@ mod tests {
         spawn_focus(
             Arc::clone(&forge),
             Some(Arc::clone(&cache)),
+            Scope::All,
             None,
             tx.clone(),
         )
@@ -517,9 +689,15 @@ mod tests {
         assert!(first.fresh);
 
         // Second run: cached copy first, then fresh.
-        spawn_focus(Arc::clone(&forge), Some(Arc::clone(&cache)), None, tx)
-            .await
-            .unwrap();
+        spawn_focus(
+            Arc::clone(&forge),
+            Some(Arc::clone(&cache)),
+            Scope::All,
+            None,
+            tx,
+        )
+        .await
+        .unwrap();
         let events = focus_events(&mut rx, 2).await;
         let (
             DataEvent::Focus {
@@ -540,22 +718,114 @@ mod tests {
     async fn failures_keep_the_cached_value_visible() {
         let cache = Arc::new(Cache::in_memory().unwrap());
         let (tx, mut rx) = mpsc::unbounded_channel();
-        spawn_unread(demo(), Some(Arc::clone(&cache)), false, tx.clone())
-            .await
-            .unwrap();
+        spawn_unread(
+            demo(),
+            Some(Arc::clone(&cache)),
+            Scope::All,
+            false,
+            tx.clone(),
+        )
+        .await
+        .unwrap();
         let _ = focus_events(&mut rx, 1).await;
 
         let failing: Arc<dyn Forge> = Arc::new(MockForge::demo(MockOptions {
             failure_rate: 1.0,
             ..MockOptions::instant()
         }));
-        spawn_unread(failing, Some(cache), false, tx).await.unwrap();
+        spawn_unread(failing, Some(cache), Scope::All, false, tx)
+            .await
+            .unwrap();
         let events = focus_events(&mut rx, 2).await;
         assert!(matches!(&events[0], DataEvent::UnreadCount { result: Ok(l), .. } if !l.fresh));
         assert!(matches!(
             &events[1],
             DataEvent::UnreadCount { result: Err(_), .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn pulls_found_by_the_review_search_are_marked() {
+        let query = |reviewer: Option<&str>| PrQuery {
+            reviewer: reviewer.map(str::to_owned),
+            ..PrQuery::default()
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        spawn_pulls(
+            demo(),
+            None,
+            "test",
+            vec![query(Some("you")), query(None)],
+            tx,
+        )
+        .await
+        .unwrap();
+        let events = focus_events(&mut rx, 1).await;
+        let DataEvent::Pulls {
+            result: Ok(loaded), ..
+        } = &events[0]
+        else {
+            panic!("expected pull requests: {events:?}");
+        };
+        assert!(
+            loaded
+                .value
+                .iter()
+                .any(|pr| pr.requested_reviewers.is_empty())
+        );
+        for pr in loaded.value.iter() {
+            let asked = pr.requested_reviewers.iter().any(|u| u.login == "you");
+            assert_eq!(pr.review_requested_of_viewer, asked, "{}", pr.reference);
+        }
+    }
+
+    fn repo(name: &str, counts: Option<(u32, u32)>) -> Repo {
+        Repo {
+            reference: RepoRef::new(hit_core::Host::new("example.test"), "acme", name),
+            description: None,
+            private: false,
+            fork: false,
+            archived: false,
+            default_branch: None,
+            url: String::new(),
+            pushed_at: None,
+            open_prs: counts.map(|c| c.0),
+            open_issues: counts.map(|c| c.1),
+        }
+    }
+
+    #[test]
+    fn counts_fill_in_without_touching_the_rest() {
+        let mut repos = [repo("a", None), repo("b", Some((1, 1))), repo("c", None)];
+        keep_known_counts(
+            &mut repos,
+            &[repo("a", Some((5, 6))), repo("b", Some((9, 9)))],
+        );
+        assert_eq!(repos[0].open_prs, Some(5), "known counts stand in");
+        assert_eq!(repos[1].open_prs, Some(1), "newer counts stay");
+        assert_eq!(repos[2].open_prs, None, "unknown stays unknown");
+
+        let counts = RepoCounts {
+            reference: repos[2].reference.clone(),
+            open_prs: 2,
+            open_issues: 3,
+        };
+        apply_counts(&mut repos, &[counts]);
+        assert_eq!(
+            (repos[2].open_prs, repos[2].open_issues),
+            (Some(2), Some(3))
+        );
+        assert_eq!(repos[0].open_prs, Some(5));
+    }
+
+    #[tokio::test]
+    async fn repositories_appear_without_waiting_for_counts() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        spawn_repos(demo(), None, None, tx).await.unwrap();
+        let events = focus_events(&mut rx, 1).await;
+        assert!(
+            matches!(&events[0], DataEvent::Repos { result: Ok(l), .. } if l.fresh && !l.value.is_empty())
+        );
     }
 
     #[test]

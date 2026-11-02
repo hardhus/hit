@@ -2,7 +2,7 @@ use std::{sync::Arc, time::Instant};
 
 use hit_cache::Cache;
 use hit_config::{Config, InboxConfig, RefreshConfig, SortOrder};
-use hit_core::{AccountId, Forge, Forges, auth::LoginFlow};
+use hit_core::{AccountId, Forge, Forges, RepoRef, auth::LoginFlow, query::Scope};
 use ratatui::{Frame, layout::Rect, style::Color};
 use tokio::sync::mpsc;
 
@@ -17,6 +17,9 @@ pub struct Services {
     pub login: Option<Arc<dyn LoginFlow>>,
     /// Local cache for instant start; `None` when disabled (and in the demo).
     pub cache: Option<Arc<Cache>>,
+    /// The repository to open on (detected from the current folder or asked
+    /// for with `--repo`).
+    pub repo: Option<RepoRef>,
 }
 
 /// Preferences views read; from the config, some adjustable at runtime.
@@ -51,6 +54,10 @@ pub struct Ctx {
     /// Only this account is shown; `None` shows all (audit D-039). Future
     /// profiles will set this instead of views knowing about accounts.
     pub account_filter: Option<AccountId>,
+    /// What every tab shows: all repositories or one (audit D-045).
+    pub scope: Scope,
+    /// The repository hit was opened on; pinned first in the Repos tab.
+    pub home_repo: Option<RepoRef>,
     started: Instant,
     tx: mpsc::UnboundedSender<Action>,
 }
@@ -64,6 +71,7 @@ impl Ctx {
         keymap: Keymap,
         tx: mpsc::UnboundedSender<Action>,
     ) -> Self {
+        let scope = services.repo.clone().map_or(Scope::All, Scope::Repo);
         Self {
             theme,
             animations,
@@ -73,6 +81,8 @@ impl Ctx {
             prefs,
             keymap,
             account_filter: None,
+            scope,
+            home_repo: services.repo,
             started: Instant::now(),
             tx,
         }
@@ -111,6 +121,15 @@ impl Ctx {
     /// The forges currently shown.
     pub fn active_forges(&self) -> impl Iterator<Item = &Arc<dyn Forge>> {
         self.forges.iter().filter(|f| self.shows(f.account()))
+    }
+
+    /// The forges that can answer for the current scope: all of them, or
+    /// the ones on the repository's host.
+    pub fn scoped_forges(&self) -> impl Iterator<Item = &Arc<dyn Forge>> {
+        self.forges.iter().filter(|f| match &self.scope {
+            Scope::All => true,
+            Scope::Repo(repo) => f.account().host == repo.host,
+        })
     }
 
     pub fn multi_account(&self) -> bool {

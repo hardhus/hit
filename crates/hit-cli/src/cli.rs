@@ -21,6 +21,7 @@ const AFTER_HELP: &str = "\
 Examples:
   hit                       open the TUI
   hit --demo                try hit with sample data, no account needed
+  hit --repo acme/rocket    open on one repository from anywhere
   hit paths                 show config, data, state, cache and log directories
   hit config init           write a commented default config.toml
   hit config check          validate config.toml and list warnings
@@ -55,6 +56,10 @@ pub struct Cli {
     /// you do leaves your machine.
     #[arg(long, env = "HIT_DEMO")]
     pub demo: bool,
+
+    /// Open on this repository instead of the one in the current folder.
+    #[arg(long, value_name = "[HOST/]OWNER/NAME")]
+    pub repo: Option<String>,
 
     #[command(subcommand)]
     pub command: Option<Command>,

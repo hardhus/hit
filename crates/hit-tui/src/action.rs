@@ -4,7 +4,10 @@ use hit_core::{
     AccountId, Forge, ForgeError, ItemRef,
     auth::DeviceCode,
     focus::FocusItem,
-    model::{Issue, IssueDetail, Notification, NotificationId, PullRequest, PullRequestDetail},
+    model::{
+        Issue, IssueDetail, Notification, NotificationId, PullRequest, PullRequestDetail, Repo,
+    },
+    query::Scope,
 };
 
 use crate::{highlight::HighlightedDiff, keymap::Command, sync::Loaded};
@@ -26,6 +29,8 @@ pub enum Action {
     AccountAdded(ForgeHandle),
     /// Show one account only, cycling through them, then all again.
     CycleAccount,
+    /// Narrow everything to one repository, or show all of them again.
+    SetScope(Scope),
     /// Open a full-screen detail view.
     ShowDetail(Detail),
     /// A short message in the corner.
@@ -42,26 +47,35 @@ pub enum DataEvent {
     Refreshing(AccountId),
     Focus {
         account: AccountId,
+        scope: Scope,
         result: Result<Loaded<Arc<Vec<FocusItem>>>, ForgeError>,
     },
     UnreadCount {
         account: AccountId,
+        scope: Scope,
         result: Result<Loaded<usize>, ForgeError>,
     },
     Notifications {
         account: AccountId,
+        scope: Scope,
         unread_only: bool,
         result: Result<Loaded<Arc<Vec<Notification>>>, ForgeError>,
     },
     Pulls {
         account: AccountId,
+        scope: Scope,
         view: &'static str,
         result: Result<Loaded<Arc<Vec<PullRequest>>>, ForgeError>,
     },
     Issues {
         account: AccountId,
+        scope: Scope,
         view: &'static str,
         result: Result<Loaded<Arc<Vec<Issue>>>, ForgeError>,
+    },
+    Repos {
+        account: AccountId,
+        result: Result<Loaded<Arc<Vec<Repo>>>, ForgeError>,
     },
     IssueDetail {
         item: ItemRef,

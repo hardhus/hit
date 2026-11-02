@@ -269,10 +269,7 @@ impl FocusTab {
             top.push(badge);
         }
         top.push(chips::subject_icon(&item.subject, t));
-        top.push(Span::styled(
-            format!(" {} ", item.subject.reference()),
-            Style::new().fg(t.muted),
-        ));
+        top.extend(chips::item_ref(item.subject.reference(), ctx));
         top.push(Span::styled(item.subject.title().to_owned(), bold(t.fg)));
 
         let mut bottom = Vec::new();
@@ -563,7 +560,7 @@ impl Tab for FocusTab {
             0 => None,
             minutes => Some(Duration::from_secs(u64::from(minutes) * 60)),
         };
-        for forge in ctx.forges.iter() {
+        for forge in ctx.scoped_forges() {
             self.accounts.entry(forge.account().clone()).or_default();
             if forge.focus().is_none() {
                 continue;
@@ -571,12 +568,14 @@ impl Tab for FocusTab {
             self.tasks.push(sync::spawn_focus(
                 Arc::clone(forge),
                 ctx.cache.clone(),
+                ctx.scope.clone(),
                 every,
                 ctx.sender(),
             ));
             self.tasks.push(sync::spawn_unread(
                 Arc::clone(forge),
                 ctx.cache.clone(),
+                ctx.scope.clone(),
                 ctx.prefs.refresh.notifications,
                 ctx.sender(),
             ));
@@ -584,6 +583,17 @@ impl Tab for FocusTab {
         if self.appeared.is_none() {
             self.appeared = Some(Moment::now());
         }
+    }
+
+    fn scope_changed(&mut self, ctx: &Ctx) {
+        self.accounts.clear();
+        self.filter.clear();
+        self.editing = false;
+        self.list = ListState::default();
+        self.selected = None;
+        self.cursor = None;
+        self.appeared = Some(Moment::now());
+        self.mount(ctx);
     }
 
     fn command(&mut self, command: Command, ctx: &Ctx) -> Option<Action> {
@@ -705,7 +715,11 @@ impl Tab for FocusTab {
             DataEvent::Refreshing(account) => {
                 self.accounts.entry(account.clone()).or_default().refreshing = true;
             }
-            DataEvent::Focus { account, result } => {
+            DataEvent::Focus { scope, .. } | DataEvent::UnreadCount { scope, .. }
+                if *scope != ctx.scope => {}
+            DataEvent::Focus {
+                account, result, ..
+            } => {
                 let data = self.accounts.entry(account.clone()).or_default();
                 match result {
                     Ok(loaded) => {
@@ -722,7 +736,9 @@ impl Tab for FocusTab {
                 }
                 self.restore_selection(ctx);
             }
-            DataEvent::UnreadCount { account, result } => {
+            DataEvent::UnreadCount {
+                account, result, ..
+            } => {
                 let data = self.accounts.entry(account.clone()).or_default();
                 match result {
                     Ok(loaded) => data.unread = Some(loaded.clone()),

@@ -4,6 +4,8 @@
 # Run `hit config check` after editing to see warnings.
 
 [general]
+# Inside a git repository, open on that repository (press . for everything).
+repo_context = true
 
 [ui]
 # Keep the terminal background visible behind hit.

@@ -1,17 +1,19 @@
 //! Issues: ready-made views (involved, assigned, created, mentioned, closed)
-//! across all shown accounts, with a label picker.
+//! across all shown accounts, with a label picker. Inside a repository the
+//! first view is everything open in it, what concerns the user first (audit
+//! D-045).
 
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap, HashSet},
     sync::Arc,
     time::Duration,
 };
 
 use crossterm::event::KeyCode;
 use hit_core::{
-    AccountId, ForgeError, ItemRef,
+    AccountId, ForgeError, ItemRef, focus,
     model::Issue,
-    query::{IssueQuery, StateFilter},
+    query::{IssueQuery, Scope, StateFilter},
 };
 use ratatui::{
     Frame,
@@ -69,8 +71,9 @@ impl View {
         }
     }
 
-    fn title(self) -> &'static str {
+    fn title(self, in_repo: bool) -> &'static str {
         match self {
+            Self::Involved if in_repo => "all open",
             Self::Involved => "involved",
             Self::Assigned => "assigned",
             Self::Created => "created",
@@ -90,6 +93,63 @@ impl View {
         }
         query
     }
+
+    /// What to fetch. A repository's first view also asks for what concerns
+    /// the user directly, so it cannot fall off the end of a busy repository.
+    fn queries(self, me: &str, scope: &Scope) -> Vec<IssueQuery> {
+        let scoped = |mut query: IssueQuery| {
+            query.scope = scope.clone();
+            query
+        };
+        let mut queries = vec![scoped(self.query(me))];
+        if self == Self::Involved && scope.repo().is_some() {
+            queries.push(scoped(Self::Assigned.query(me)));
+            queries.push(scoped(Self::Created.query(me)));
+        }
+        queries
+    }
+}
+
+/// Groups of a repository's first view, most urgent first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Group {
+    NeedsYou,
+    Yours,
+    Others,
+}
+
+impl Group {
+    fn of(issue: &Issue, me: &str) -> Self {
+        if !focus::issue_reasons(issue, me, false).is_empty() {
+            Self::NeedsYou
+        } else if issue.author.login == me {
+            Self::Yours
+        } else {
+            Self::Others
+        }
+    }
+
+    fn title(self) -> &'static str {
+        match self {
+            Self::NeedsYou => "Assigned to you",
+            Self::Yours => "You opened",
+            Self::Others => "Everything else",
+        }
+    }
+
+    fn color(self, ctx: &Ctx) -> Color {
+        match self {
+            Self::NeedsYou => ctx.theme.accent_alt,
+            Self::Yours => ctx.theme.accent,
+            Self::Others => ctx.theme.info,
+        }
+    }
+}
+
+/// A list position: a group header or an issue.
+enum Slot<'a> {
+    Header(Group, usize),
+    Item(&'a AccountId, &'a Issue),
 }
 
 #[derive(Default)]
@@ -115,6 +175,8 @@ pub struct IssuesTab {
     cursor: Option<Tween>,
     appeared: Option<Moment>,
     list_height: u16,
+    /// Whether the rows are grouped, for the hint line.
+    grouped: bool,
 }
 
 impl Drop for IssuesTab {
@@ -183,19 +245,32 @@ impl IssuesTab {
     }
 
     /// Everything in the current view, before the label and text filters.
-    fn loaded<'a>(&'a self, ctx: &'a Ctx) -> impl Iterator<Item = (&'a AccountId, &'a Issue)> {
-        self.shown_data(ctx).flat_map(|(account, data)| {
-            data.items
-                .iter()
-                .flat_map(|l| l.value.iter())
-                .map(move |issue| (account, issue))
-        })
+    fn loaded<'a>(&'a self, ctx: &'a Ctx) -> Vec<(&'a AccountId, &'a Issue)> {
+        let mut items: Vec<_> = self
+            .shown_data(ctx)
+            .flat_map(|(account, data)| {
+                data.items
+                    .iter()
+                    .flat_map(|l| l.value.iter())
+                    .map(move |issue| (account, issue))
+            })
+            .collect();
+        // Two accounts can see the same issue; keep the one it asks the most of.
+        items.sort_by(|(a, x), (b, y)| {
+            Group::of(x, &a.login)
+                .cmp(&Group::of(y, &b.login))
+                .then_with(|| a.login.cmp(&b.login))
+        });
+        let mut seen = HashSet::new();
+        items.retain(|(_, issue)| seen.insert(&issue.reference));
+        items
     }
 
     fn visible<'a>(&'a self, ctx: &'a Ctx) -> Vec<(&'a AccountId, &'a Issue)> {
         let needle = self.filter.to_lowercase();
         let mut items: Vec<_> = self
             .loaded(ctx)
+            .into_iter()
             .filter(|(_, issue)| {
                 self.labels.is_empty() || issue.labels.iter().any(|l| self.labels.contains(&l.name))
             })
@@ -248,40 +323,83 @@ impl IssuesTab {
         items
     }
 
-    fn rows(&self, ctx: &Ctx) -> Vec<Row> {
-        let t = &ctx.theme;
-        self.visible(ctx)
-            .into_iter()
-            .map(|(account, issue)| {
-                let mut top = Vec::new();
-                if let Some(badge) = chips::account_badge(account, ctx) {
-                    top.push(badge);
-                }
-                top.push(chips::issue_icon(issue, t));
-                top.push(Span::styled(
-                    format!(" {} ", issue.reference),
-                    Style::new().fg(t.muted),
-                ));
-                top.push(Span::styled(issue.title.clone(), bold(t.fg)));
-                // The first label's color says what kind of issue it is.
-                let accent = issue
-                    .labels
+    fn is_grouped(&self, ctx: &Ctx) -> bool {
+        ctx.scope.repo().is_some() && self.current() == View::Involved
+    }
+
+    /// The list: flat, or under group headers in a repository's first view.
+    fn slots<'a>(&'a self, ctx: &'a Ctx) -> Vec<Slot<'a>> {
+        let mut items = self.visible(ctx);
+        if !self.is_grouped(ctx) {
+            return items.into_iter().map(|(a, i)| Slot::Item(a, i)).collect();
+        }
+        // Stable: keeps the time order inside each group.
+        items.sort_by_key(|(account, issue)| Group::of(issue, &account.login));
+        let mut slots = Vec::with_capacity(items.len() + 3);
+        let mut current = None;
+        for (index, (account, issue)) in items.iter().enumerate() {
+            let group = Group::of(issue, &account.login);
+            if current != Some(group) {
+                let count = items[index..]
                     .iter()
-                    .find_map(|l| l.color)
-                    .map_or(t.accent, |c| Color::Rgb(c.0, c.1, c.2));
-                Row::item(
-                    Line::from(top),
-                    Line::from(issue_status_spans(issue, ctx)),
-                    accent,
-                )
+                    .take_while(|(a, i)| Group::of(i, &a.login) == group)
+                    .count();
+                slots.push(Slot::Header(group, count));
+                current = Some(group);
+            }
+            slots.push(Slot::Item(account, issue));
+        }
+        slots
+    }
+
+    fn header(group: Group, count: usize, ctx: &Ctx) -> Row {
+        let t = &ctx.theme;
+        let color = group.color(ctx);
+        Row::Header(Line::from(vec![
+            Span::styled("▸ ", bold(color)),
+            Span::styled(group.title(), bold(color)),
+            Span::styled(format!("  {count} "), Style::new().fg(t.muted)),
+            Span::styled("─".repeat(200), Style::new().fg(t.border)),
+        ]))
+    }
+
+    fn row(account: &AccountId, issue: &Issue, ctx: &Ctx) -> Row {
+        let t = &ctx.theme;
+        let mut top = Vec::new();
+        if let Some(badge) = chips::account_badge(account, ctx) {
+            top.push(badge);
+        }
+        top.push(chips::issue_icon(issue, t));
+        top.extend(chips::item_ref(&issue.reference, ctx));
+        top.push(Span::styled(issue.title.clone(), bold(t.fg)));
+        // The first label's color says what kind of issue it is.
+        let accent = issue
+            .labels
+            .iter()
+            .find_map(|l| l.color)
+            .map_or(t.accent, |c| Color::Rgb(c.0, c.1, c.2));
+        Row::item(
+            Line::from(top),
+            Line::from(issue_status_spans(issue, ctx)),
+            accent,
+        )
+    }
+
+    fn rows(&self, ctx: &Ctx) -> Vec<Row> {
+        self.slots(ctx)
+            .into_iter()
+            .map(|slot| match slot {
+                Slot::Header(group, count) => Self::header(group, count, ctx),
+                Slot::Item(account, issue) => Self::row(account, issue, ctx),
             })
             .collect()
     }
 
     fn selected_issue(&self, ctx: &Ctx) -> Option<(AccountId, Issue)> {
-        self.visible(ctx)
-            .get(self.list.selected)
-            .map(|(a, issue)| ((*a).clone(), (*issue).clone()))
+        match self.slots(ctx).get(self.list.selected) {
+            Some(Slot::Item(account, issue)) => Some(((*account).clone(), (*issue).clone())),
+            _ => None,
+        }
     }
 
     fn remember_selection(&mut self, ctx: &Ctx) {
@@ -294,11 +412,10 @@ impl IssuesTab {
         let Some((account, item)) = &self.selected else {
             return;
         };
-        if let Some(index) = self
-            .visible(ctx)
-            .iter()
-            .position(|(a, issue)| *a == account && &issue.reference == item)
-        {
+        let found = self.slots(ctx).iter().position(
+            |slot| matches!(slot, Slot::Item(a, issue) if *a == account && &issue.reference == item),
+        );
+        if let Some(index) = found {
             self.list.selected = index;
         }
     }
@@ -312,11 +429,14 @@ impl IssuesTab {
             }
             if index == self.view {
                 spans.push(Span::styled(
-                    format!("◆ {}", view.title()),
+                    format!("◆ {}", view.title(ctx.scope.repo().is_some())),
                     bold(t.accent_alt),
                 ));
             } else {
-                spans.push(Span::styled(view.title(), Style::new().fg(t.muted)));
+                spans.push(Span::styled(
+                    view.title(ctx.scope.repo().is_some()),
+                    Style::new().fg(t.muted),
+                ));
             }
         }
         if !self.labels.is_empty() {
@@ -454,20 +574,35 @@ impl Tab for IssuesTab {
     fn mount(&mut self, ctx: &Ctx) {
         self.stop();
         let view = self.current();
-        for forge in ctx.forges.iter() {
+        self.grouped = self.is_grouped(ctx);
+        for forge in ctx.scoped_forges() {
             let account = forge.account().clone();
             self.data.entry((account.clone(), view.key())).or_default();
             self.tasks.push(sync::spawn_issues(
                 Arc::clone(forge),
                 ctx.cache.clone(),
                 view.key(),
-                view.query(&account.login),
+                view.queries(&account.login, &ctx.scope),
                 ctx.sender(),
             ));
         }
         if self.appeared.is_none() {
             self.appeared = Some(Moment::now());
         }
+    }
+
+    fn scope_changed(&mut self, ctx: &Ctx) {
+        self.data.clear();
+        self.view = 0;
+        self.filter.clear();
+        self.editing = false;
+        self.labels.clear();
+        self.picker = None;
+        self.list = ListState::default();
+        self.selected = None;
+        self.cursor = None;
+        self.appeared = Some(Moment::now());
+        self.mount(ctx);
     }
 
     fn command(&mut self, command: Command, ctx: &Ctx) -> Option<Action> {
@@ -478,6 +613,8 @@ impl Tab for IssuesTab {
             Command::Up => self.list.move_by(-1, &rows),
             Command::Top => self.list.top(&rows),
             Command::Bottom => self.list.bottom(&rows),
+            Command::NextGroup => self.list.jump_group(true, &rows),
+            Command::PrevGroup => self.list.jump_group(false, &rows),
             Command::PageDown => self.list.move_by(page, &rows),
             Command::PageUp => self.list.move_by(-page, &rows),
             Command::Open => {
@@ -572,10 +709,14 @@ impl Tab for IssuesTab {
     fn update(&mut self, action: &Action, ctx: &Ctx) {
         if let Action::Data(DataEvent::Issues {
             account,
+            scope,
             view,
             result,
         }) = action
         {
+            if *scope != ctx.scope {
+                return;
+            }
             let data = self.data.entry((account.clone(), view)).or_default();
             match result {
                 Ok(loaded) => {
@@ -599,7 +740,12 @@ impl Tab for IssuesTab {
         let [bar, list_area] =
             Layout::vertical([Constraint::Length(2), Constraint::Fill(1)]).areas(area.list);
         let rows = self.rows(ctx);
-        self.render_bar(frame, Rect { height: 1, ..bar }, rows.len(), ctx);
+        self.render_bar(
+            frame,
+            Rect { height: 1, ..bar },
+            rows.iter().filter(|r| r.is_item()).count(),
+            ctx,
+        );
         self.list_height = list_area.height;
 
         if rows.is_empty() {
@@ -664,14 +810,26 @@ impl Tab for IssuesTab {
     }
 
     fn hints(&self) -> &'static [(&'static [Command], &'static str)] {
-        &[
-            (&[Command::Down, Command::Up], "move"),
-            (&[Command::Open], "open"),
-            (&[Command::CycleReason], "view"),
-            (&[Command::Labels], "labels"),
-            (&[Command::Filter], "filter"),
-            (&[Command::Browser], "browser"),
-        ]
+        if self.grouped {
+            &[
+                (&[Command::Down, Command::Up], "move"),
+                (&[Command::NextGroup, Command::PrevGroup], "groups"),
+                (&[Command::Open], "open"),
+                (&[Command::CycleReason], "view"),
+                (&[Command::Labels], "labels"),
+                (&[Command::Filter], "filter"),
+                (&[Command::Browser], "browser"),
+            ]
+        } else {
+            &[
+                (&[Command::Down, Command::Up], "move"),
+                (&[Command::Open], "open"),
+                (&[Command::CycleReason], "view"),
+                (&[Command::Labels], "labels"),
+                (&[Command::Filter], "filter"),
+                (&[Command::Browser], "browser"),
+            ]
+        }
     }
 
     fn jump_targets(&self) -> Vec<JumpTarget> {

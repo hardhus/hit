@@ -68,7 +68,7 @@ pub fn pr_reasons(pr: &PullRequest, me: &str, mentioned: bool) -> Vec<FocusReaso
     }
     let mut reasons = Vec::new();
     let mine = pr.author.login == me;
-    if pr.requested_reviewers.iter().any(|u| u.login == me) {
+    if pr.review_requested_of_viewer || pr.requested_reviewers.iter().any(|u| u.login == me) {
         reasons.push(FocusReason::ReviewRequested);
     }
     if mine && pr.review_decision == Some(ReviewDecision::ChangesRequested) {

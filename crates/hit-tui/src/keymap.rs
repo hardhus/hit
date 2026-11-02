@@ -68,6 +68,7 @@ commands! {
     Tab5         => "tab_5",         Global, "Go to Repositories",               ["5"];
     Refresh      => "refresh",       Global, "Refresh now",                      ["r"];
     CycleAccount => "cycle_account", Global, "Show one account / all accounts",  ["a"];
+    ToggleScope  => "repo_scope",    Global, "This repository / all repositories", ["."];
     Up           => "up",            List,   "Move up",                          ["k", "up"];
     Down         => "down",          List,   "Move down",                        ["j", "down"];
     Top          => "top",           List,   "Go to the first item",             ["g", "home"];

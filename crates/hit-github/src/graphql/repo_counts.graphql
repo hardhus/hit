@@ -1,0 +1,21 @@
+# Open counts of the viewer's repositories, recently pushed first. Counting is
+# what makes this slow, so the list itself comes from REST.
+query RepoCounts($first: Int!, $after: String) {
+  viewer {
+    repositories(
+      first: $first
+      after: $after
+      orderBy: { field: PUSHED_AT, direction: DESC }
+      affiliations: [OWNER, COLLABORATOR, ORGANIZATION_MEMBER]
+      ownerAffiliations: [OWNER, COLLABORATOR, ORGANIZATION_MEMBER]
+    ) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        name
+        owner { login }
+        pullRequests(states: OPEN) { totalCount }
+        issues(states: OPEN) { totalCount }
+      }
+    }
+  }
+}

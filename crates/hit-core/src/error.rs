@@ -8,7 +8,7 @@ pub type Result<T, E = ForgeError> = std::result::Result<T, E>;
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum ForgeError {
-    #[error("not signed in, or the token is no longer valid")]
+    #[error("the token was rejected; sign in again with `hit auth login`")]
     Unauthorized,
     #[error("access denied: {message}")]
     Forbidden {
@@ -21,6 +21,9 @@ pub enum ForgeError {
     RateLimited { reset_at: Option<Timestamp> },
     #[error("network error: {0}")]
     Network(String),
+    /// The forge answered but could not serve the request right now.
+    #[error("the server is having trouble ({0}); try again shortly")]
+    Unavailable(String),
     #[error("{0} is not supported by this forge")]
     Unsupported(&'static str),
     #[error("unexpected response from the forge: {0}")]
@@ -33,7 +36,10 @@ pub enum ForgeError {
 impl ForgeError {
     /// Whether trying again later may succeed.
     pub fn is_retryable(&self) -> bool {
-        matches!(self, Self::Network(_) | Self::RateLimited { .. })
+        matches!(
+            self,
+            Self::Network(_) | Self::Unavailable(_) | Self::RateLimited { .. }
+        )
     }
 }
 

@@ -16,6 +16,7 @@ use crate::{
     focus::FocusItem,
     model::{
         Issue, IssueDetail, Notification, NotificationId, PullRequest, PullRequestDetail, Repo,
+        RepoCounts,
     },
     query::{IssueQuery, NotificationQuery, Page, PageRequest, PrQuery, Scope},
 };
@@ -95,4 +96,13 @@ pub trait Repositories: Send + Sync {
     async fn get(&self, repo: &RepoRef) -> Result<Repo>;
     /// Repositories the user owns or contributes to.
     async fn list_mine(&self, page: &PageRequest) -> Result<Page<Repo>>;
+    /// Open counts for [`Self::list_mine`], most recently pushed first, for
+    /// forges where they cost more than the list. Others report them with
+    /// the repository and leave this empty.
+    async fn open_counts(&self, _page: &PageRequest) -> Result<Page<RepoCounts>> {
+        Ok(Page {
+            items: Vec::new(),
+            next: None,
+        })
+    }
 }

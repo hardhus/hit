@@ -1,7 +1,7 @@
 //! Small colored spans: reasons, labels, accounts, states.
 
 use hit_core::{
-    AccountId,
+    AccountId, ItemRef, RepoRef,
     focus::{FocusReason, FocusSubject},
     model::{CheckState, CheckSummary, CloseReason, Issue, IssueState, Label, PrState},
 };
@@ -64,6 +64,44 @@ pub fn label_span(label: &Label, theme: &Theme) -> Span<'static> {
 pub fn account_badge(account: &AccountId, ctx: &Ctx) -> Option<Span<'static>> {
     ctx.multi_account()
         .then(|| Span::styled("▍", Style::new().fg(ctx.account_color(account))))
+}
+
+/// A color that stays the same for a repository, run after run.
+pub fn repo_color(repo: &RepoRef, theme: &Theme) -> Color {
+    let palette = [theme.accent, theme.accent_alt, theme.info, theme.highlight];
+    // FNV-1a: std's hasher may change between Rust releases.
+    let hash = repo
+        .to_string()
+        .bytes()
+        .fold(0x811c_9dc5_u32, |hash, byte| {
+            (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193)
+        });
+    palette
+        .get(hash as usize % palette.len())
+        .copied()
+        .unwrap_or(theme.accent)
+}
+
+/// A repository's name in its own color, or nothing inside its own scope
+/// where the name would only repeat what the header says.
+pub fn repo_span(repo: &RepoRef, ctx: &Ctx) -> Option<Span<'static>> {
+    (ctx.scope.repo() != Some(repo)).then(|| {
+        Span::styled(
+            repo.to_string(),
+            Style::new().fg(repo_color(repo, &ctx.theme)),
+        )
+    })
+}
+
+/// ` acme/rocket#12 ` for list rows; ` #12 ` when scoped to that repository.
+pub fn item_ref(item: &ItemRef, ctx: &Ctx) -> Vec<Span<'static>> {
+    let mut spans = vec![Span::raw(" ")];
+    spans.extend(repo_span(&item.repo, ctx));
+    spans.push(Span::styled(
+        format!("#{} ", item.number),
+        Style::new().fg(ctx.theme.muted),
+    ));
+    spans
 }
 
 /// Icon for a pull request (by state) or issue.
@@ -138,6 +176,13 @@ mod tests {
     use hit_core::model::Rgb;
 
     use super::*;
+
+    #[test]
+    fn a_repository_keeps_its_color() {
+        let theme = Theme::jinx(true, true);
+        let repo = RepoRef::new(hit_core::Host::new("github.com"), "acme", "rocket");
+        assert_eq!(repo_color(&repo, &theme), repo_color(&repo.clone(), &theme));
+    }
 
     #[test]
     fn label_text_is_readable() {

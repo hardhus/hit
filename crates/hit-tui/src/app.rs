@@ -202,6 +202,7 @@ impl App {
                         .cloned(),
                 };
             }
+            Action::SetScope(ref scope) => self.ctx.scope = scope.clone(),
             Action::ShowDetail(ref detail) => {
                 let view: Box<dyn View> = match detail {
                     Detail::Notification {

@@ -337,19 +337,40 @@ impl Focus for MockForge {
 impl Repositories for MockForge {
     async fn get(&self, repo: &RepoRef) -> Result<Repo> {
         self.network().await?;
-        self.data()
-            .repos
+        let data = self.data();
+        data.repos
             .iter()
             .find(|r| &r.reference == repo)
-            .cloned()
+            .map(|r| with_counts(&data, r))
             .ok_or(ForgeError::NotFound)
     }
 
     async fn list_mine(&self, page: &PageRequest) -> Result<Page<Repo>> {
         self.network().await?;
-        let mut repos = self.data().repos.clone();
+        let mut repos: Vec<Repo> = {
+            let data = self.data();
+            data.repos.iter().map(|r| with_counts(&data, r)).collect()
+        };
         repos.sort_by_key(|r| Reverse(r.pushed_at));
         paginate(repos, page)
+    }
+}
+
+fn with_counts(data: &Data, repo: &Repo) -> Repo {
+    let open_prs = data
+        .pulls
+        .iter()
+        .filter(|d| d.pr.is_open() && d.pr.reference.repo == repo.reference)
+        .count();
+    let open_issues = data
+        .issues
+        .iter()
+        .filter(|d| d.issue.is_open() && d.issue.reference.repo == repo.reference)
+        .count();
+    Repo {
+        open_prs: u32::try_from(open_prs).ok(),
+        open_issues: u32::try_from(open_issues).ok(),
+        ..repo.clone()
     }
 }
 

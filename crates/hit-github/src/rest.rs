@@ -72,6 +72,8 @@ impl RepoJson {
             default_branch: self.default_branch,
             url: self.html_url,
             pushed_at: self.pushed_at,
+            open_prs: None,
+            open_issues: None,
         }
     }
 }

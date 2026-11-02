@@ -16,6 +16,7 @@ use hit_core::{
     focus::{self, FocusItem, FocusReason, FocusSubject},
     model::{
         Issue, IssueDetail, Notification, NotificationId, PullRequest, PullRequestDetail, Repo,
+        RepoCounts,
     },
     query::{
         Cursor, IssueQuery, NotificationQuery, Page, PageRequest, PrQuery, Scope, Sort, StateFilter,
@@ -28,7 +29,8 @@ use crate::{
     Api,
     api::Op,
     nodes::{
-        self, FocusData, IssueData, PullData, SearchConnection, SearchData, SearchNode, queries,
+        self, FocusData, IssueData, PullData, ReposData, SearchConnection, SearchData, SearchNode,
+        queries,
     },
     rest::{NotificationJson, RepoJson, repo_path, thread_id},
 };
@@ -37,6 +39,10 @@ use crate::{
 const MAX_DIFF_BYTES: usize = 10 * 1024 * 1024;
 /// Items per Action Required category.
 const FOCUS_PER_CATEGORY: u32 = 50;
+/// Counting makes this query slow, and GitHub answers 502 when it runs out of
+/// time. Asking for fewer at once lets it finish.
+const REPO_COUNTS_PER_REQUEST: u16 = 25;
+const REPO_COUNTS_PER_RETRY: u16 = 10;
 
 /// Which Action Required categories to fetch (`[focus]` in the config).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -553,6 +559,38 @@ impl Repositories for GithubForge {
         let raw: Vec<RepoJson> = fetched.json("repos")?;
         Ok(Page {
             items: raw.into_iter().map(|r| r.into_model(self.host())).collect(),
+            next,
+        })
+    }
+
+    async fn open_counts(&self, page: &PageRequest) -> Result<Page<RepoCounts>> {
+        let first = page.per_page.clamp(1, REPO_COUNTS_PER_REQUEST);
+        let request = |first: u16| {
+            self.api.graphql::<ReposData>(
+                queries::REPO_COUNTS,
+                json!({
+                    "first": first,
+                    "after": page.cursor.as_ref().map(|c| c.0.clone()),
+                }),
+            )
+        };
+        let data = match request(first).await {
+            Err(ForgeError::Unavailable(_)) => request(first.min(REPO_COUNTS_PER_RETRY)).await?,
+            other => other?,
+        };
+        let connection = data.viewer.repositories;
+        let next = connection
+            .page_info
+            .filter(|p| p.has_next_page)
+            .and_then(|p| p.end_cursor)
+            .map(Cursor);
+        Ok(Page {
+            items: connection
+                .nodes
+                .into_iter()
+                .flatten()
+                .map(|node| node.into_model(self.host()))
+                .collect(),
             next,
         })
     }
