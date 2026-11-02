@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.1.0] - unreleased
+## [0.1.0] - 2026-11-03
 
 The first release. Open it in the morning, see what needs you, deal with it.
 
@@ -19,4 +19,12 @@ The first release. Open it in the morning, see what needs you, deal with it.
 - `hit --demo` to try everything without an account.
 
 Known limits: no inline review comments yet, no opening of issues or pull
-requests, no CI logs. macOS builds are tested automatically but not by hand.
+requests, no CI logs. GitHub only for now.
+
+Tested by hand on Windows, and on Linux only briefly and without a desktop
+keyring. macOS builds pass the automated tests but have not been used by hand;
+reports are welcome.
+
+The binaries are not signed, so Windows SmartScreen and macOS Gatekeeper may warn
+the first time you open them. On macOS, `xattr -d com.apple.quarantine hit` clears
+it. `SHA256SUMS` lists each file's checksum.
