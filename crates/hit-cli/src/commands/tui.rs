@@ -80,9 +80,15 @@ pub fn run(paths: &Paths, options: &Options<'_>) -> Result<()> {
             login: accounts::tui_login(&loaded.config, paths),
             cache: accounts::open_cache(&loaded.config, paths),
             repo: None,
+            repo_candidates: Vec::new(),
             config_file: Some(options.config_file.to_path_buf()),
         }
     };
+    if services.forges.is_empty() && !options.demo && loaded.config.general.repo_context {
+        services.repo_candidates = std::env::current_dir()
+            .map(|cwd| repo::remotes_of(&cwd))
+            .unwrap_or_default();
+    }
     match repo_to_open(options, &loaded.config, &services.forges) {
         Ok(repo) => services.repo = repo,
         Err(warning) => {

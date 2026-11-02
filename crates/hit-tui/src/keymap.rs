@@ -70,6 +70,7 @@ commands! {
     CycleAccount => "cycle_account", Global, "Show one account / all accounts",  ["a"];
     ToggleScope  => "repo_scope",    Global, "This repository / all repositories", ["."];
     Settings     => "settings",      Global, "Settings",                         [","];
+    SignIn       => "sign_in",       Global, "Sign in again",                    [];
     Up           => "up",            List,   "Move up",                          ["k", "up"];
     Down         => "down",          List,   "Move down",                        ["j", "down"];
     Top          => "top",           List,   "Go to the first item",             ["g", "home"];

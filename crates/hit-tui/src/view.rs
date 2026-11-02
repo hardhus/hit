@@ -20,6 +20,9 @@ pub struct Services {
     /// The repository to open on (detected from the current folder or asked
     /// for with `--repo`).
     pub repo: Option<RepoRef>,
+    /// Repositories of the current folder, for when hit opens with no account
+    /// yet and `repo` could not be decided.
+    pub repo_candidates: Vec<RepoRef>,
     /// Where settings are saved; `None` keeps them in memory (the demo).
     pub config_file: Option<PathBuf>,
 }
@@ -66,6 +69,7 @@ pub struct Ctx {
     pub scope: Scope,
     /// The repository hit was opened on; pinned first in the Repos tab.
     pub home_repo: Option<RepoRef>,
+    repo_candidates: Vec<RepoRef>,
     started: Instant,
     tx: mpsc::UnboundedSender<Action>,
 }
@@ -92,6 +96,7 @@ impl Ctx {
             account_filter: None,
             scope,
             home_repo: services.repo,
+            repo_candidates: services.repo_candidates,
             started: Instant::now(),
             tx,
         }
@@ -106,6 +111,17 @@ impl Ctx {
         ctx.theme = Theme::jinx(true, true);
         ctx.animations = false;
         (ctx, rx)
+    }
+
+    /// The first sign-in, from inside a repository: open on it, as the next
+    /// start would.
+    pub(crate) fn adopt_home_repo(&mut self) {
+        let host_known =
+            |repo: &&RepoRef| self.forges.iter().any(|f| f.account().host == repo.host);
+        if let Some(repo) = self.repo_candidates.iter().find(host_known).cloned() {
+            self.scope = Scope::Repo(repo.clone());
+            self.home_repo = Some(repo);
+        }
     }
 
     /// Puts changed settings to work. What needs a restart only takes effect
@@ -231,6 +247,41 @@ mod tests {
         fn lock_read_only(&self) {
             self.locked.store(true, Ordering::Relaxed);
         }
+    }
+
+    #[test]
+    fn the_first_sign_in_opens_on_the_folder_s_repository() {
+        let host = Host::new("example.test");
+        let other = RepoRef::new(Host::new("elsewhere.test"), "a", "b");
+        let wanted = RepoRef::new(host.clone(), "acme", "rocket");
+        let (mut ctx, _rx) = Ctx::for_tests(Services {
+            repo_candidates: vec![other, wanted.clone()],
+            ..Services::default()
+        });
+        assert_eq!(ctx.scope, Scope::All);
+
+        ctx.forges.upsert(Arc::new(Spy {
+            account: AccountId::new(host, "someone"),
+            locked: AtomicBool::new(false),
+        }));
+        ctx.adopt_home_repo();
+
+        assert_eq!(ctx.scope, Scope::Repo(wanted.clone()));
+        assert_eq!(ctx.home_repo, Some(wanted));
+    }
+
+    #[test]
+    fn a_new_token_replaces_the_account_instead_of_adding_it() {
+        let forge = || {
+            Arc::new(Spy {
+                account: AccountId::new(Host::new("example.test"), "someone"),
+                locked: AtomicBool::new(false),
+            })
+        };
+        let mut forges = Forges::new();
+        forges.upsert(forge());
+        forges.upsert(forge());
+        assert_eq!(forges.len(), 1);
     }
 
     #[test]

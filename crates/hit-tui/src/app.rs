@@ -251,10 +251,18 @@ impl App {
             }
             Action::AccountAdded(ref handle) => {
                 tracing::info!(account = %handle.0.account(), "account added");
-                self.ctx.forges.add(Arc::clone(&handle.0));
-                // Leave the empty state: from now on the main screen.
-                self.views.clear();
-                self.push(Box::new(Shell::new(Vec::new())));
+                let first_account = self.ctx.forges.is_empty();
+                self.ctx.forges.upsert(Arc::clone(&handle.0));
+                self.views.pop();
+                if first_account {
+                    // Leave the empty state: from now on the main screen.
+                    self.ctx.adopt_home_repo();
+                    self.views.clear();
+                    self.push(Box::new(Shell::new(Vec::new())));
+                } else if let Some(view) = self.views.last_mut() {
+                    // Back where the user was, with the new token.
+                    view.update(&action, &self.ctx);
+                }
                 self.on_action(Action::Toast(Toast::success(format!(
                     "signed in as @{}",
                     handle.0.account().login

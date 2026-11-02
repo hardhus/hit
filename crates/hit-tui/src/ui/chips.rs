@@ -1,7 +1,7 @@
 //! Small colored spans: reasons, labels, accounts, states.
 
 use hit_core::{
-    AccountId, ItemRef, RepoRef,
+    AccountId, ForgeError, ItemRef, RepoRef, Timestamp,
     focus::{FocusReason, FocusSubject},
     model::{CheckState, CheckSummary, CloseReason, Issue, IssueState, Label, PrState},
 };
@@ -11,6 +11,26 @@ use ratatui::{
 };
 
 use crate::{Ctx, Theme};
+
+/// A time of day on the user's clock.
+pub fn clock(at: Timestamp) -> String {
+    at.to_zoned(jiff::tz::TimeZone::system())
+        .strftime("%H:%M")
+        .to_string()
+}
+
+/// What went wrong, in the few words a status line has room for.
+pub fn problem(error: &ForgeError) -> String {
+    match error {
+        ForgeError::Unauthorized => "signed out".to_owned(),
+        ForgeError::RateLimited { reset_at: Some(at) } => {
+            format!("rate limit reached, back at {}", clock(*at))
+        }
+        ForgeError::RateLimited { reset_at: None } => "rate limit reached".to_owned(),
+        ForgeError::Network(_) => "no connection".to_owned(),
+        other => other.to_string(),
+    }
+}
 
 pub fn bold(color: Color) -> Style {
     Style::new().fg(color).add_modifier(Modifier::BOLD)
@@ -182,6 +202,23 @@ mod tests {
         let theme = Theme::jinx(true, true);
         let repo = RepoRef::new(hit_core::Host::new("github.com"), "acme", "rocket");
         assert_eq!(repo_color(&repo, &theme), repo_color(&repo.clone(), &theme));
+    }
+
+    #[test]
+    fn problems_are_said_in_few_words() {
+        assert_eq!(problem(&ForgeError::Unauthorized), "signed out");
+        assert_eq!(
+            problem(&ForgeError::Network("a long reqwest message".into())),
+            "no connection"
+        );
+        assert_eq!(
+            problem(&ForgeError::RateLimited { reset_at: None }),
+            "rate limit reached"
+        );
+        let text = problem(&ForgeError::RateLimited {
+            reset_at: Some(Timestamp::now()),
+        });
+        assert!(text.starts_with("rate limit reached, back at "), "{text}");
     }
 
     #[test]

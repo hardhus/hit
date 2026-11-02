@@ -31,7 +31,7 @@ use crate::{
     anim::{Moment, Tween},
     browser,
     keymap::{Command, typed_char},
-    sync::{self, Loaded},
+    sync::{self, Listing, Loaded},
     ui::{
         chips::{self, bold},
         list::{ItemList, ListState, Row},
@@ -39,6 +39,8 @@ use crate::{
 };
 
 const ENTRANCE: Duration = Duration::from_millis(700);
+/// How close to the end of a list its next page is asked for.
+const LOAD_MORE_WITHIN: usize = 10;
 const CURSOR_GLIDE: Duration = Duration::from_millis(90);
 
 /// The ready-made views `f` cycles through.
@@ -151,8 +153,9 @@ enum Slot<'a> {
 
 #[derive(Default)]
 struct Data {
-    items: Option<Loaded<Arc<Vec<PullRequest>>>>,
+    items: Option<Loaded<Arc<Listing<PullRequest>>>>,
     error: Option<ForgeError>,
+    loading_more: bool,
 }
 
 #[derive(Default)]
@@ -287,6 +290,59 @@ impl PullsTab {
         items.retain(|(_, pr)| seen.insert(&pr.reference));
         items.sort_by_key(|(_, pr)| std::cmp::Reverse(pr.updated_at));
         items
+    }
+
+    /// Near the end of the list, asks for what comes next.
+    fn load_more(&mut self, ctx: &Ctx) {
+        if !self.filter.is_empty()
+            || self.rows(ctx).len().saturating_sub(self.list.selected) > LOAD_MORE_WITHIN
+        {
+            return;
+        }
+        let view = self.current();
+        for forge in ctx.scoped_forges().filter(|f| ctx.shows(f.account())) {
+            let account = forge.account().clone();
+            let Some(data) = self.data.get_mut(&(account.clone(), view.key())) else {
+                continue;
+            };
+            // A cached list's cursor may be stale; wait for the fresh one.
+            let Some(cursor) = data
+                .items
+                .as_ref()
+                .filter(|loaded| loaded.fresh)
+                .and_then(|loaded| loaded.value.next.clone())
+            else {
+                continue;
+            };
+            if data.loading_more || data.error.is_some() {
+                continue;
+            }
+            let Some(query) = view.queries(&account.login, &ctx.scope).pop() else {
+                continue;
+            };
+            data.loading_more = true;
+            self.tasks.push(sync::spawn_more_pulls(
+                Arc::clone(forge),
+                view.key(),
+                query,
+                cursor,
+                ctx.sender(),
+            ));
+        }
+    }
+
+    /// `12 shown`, or `50 / 312` while there is more to come.
+    fn count_text(&self, shown: usize, ctx: &Ctx) -> String {
+        let total: u32 = self
+            .shown_data(ctx)
+            .filter_map(|(_, data)| data.items.as_ref()?.value.total)
+            .sum();
+        let loading = self.shown_data(ctx).any(|(_, data)| data.loading_more);
+        if self.filter.is_empty() && total as usize > shown {
+            format!("{shown} / {total}{} ", if loading { " …" } else { "" })
+        } else {
+            format!("{shown} shown ")
+        }
     }
 
     fn is_grouped(&self, ctx: &Ctx) -> bool {
@@ -428,7 +484,7 @@ impl PullsTab {
         frame.render_widget(Paragraph::new(Line::from(spans)), area);
         frame.render_widget(
             Paragraph::new(Span::styled(
-                format!("{shown} shown "),
+                self.count_text(shown, ctx),
                 Style::new().fg(t.muted),
             ))
             .alignment(Alignment::Right),
@@ -453,7 +509,7 @@ impl PullsTab {
         {
             vec![
                 Line::from(Span::styled("couldn't load pull requests", bold(t.danger))),
-                Line::from(Span::styled(e.to_string(), Style::new().fg(t.muted))),
+                Line::from(Span::styled(chips::problem(e), Style::new().fg(t.muted))),
             ]
         } else if !self.filter.is_empty() {
             vec![Line::from(Span::styled(
@@ -521,13 +577,25 @@ impl Tab for PullsTab {
         let rows = self.rows(ctx);
         let page = ListState::page(self.list_height) as isize;
         match command {
-            Command::Down => self.list.move_by(1, &rows),
+            Command::Down => {
+                self.list.move_by(1, &rows);
+                self.load_more(ctx);
+            }
             Command::Up => self.list.move_by(-1, &rows),
             Command::Top => self.list.top(&rows),
-            Command::Bottom => self.list.bottom(&rows),
-            Command::PageDown => self.list.move_by(page, &rows),
+            Command::Bottom => {
+                self.list.bottom(&rows);
+                self.load_more(ctx);
+            }
+            Command::PageDown => {
+                self.list.move_by(page, &rows);
+                self.load_more(ctx);
+            }
             Command::PageUp => self.list.move_by(-page, &rows),
-            Command::NextGroup => self.list.jump_group(true, &rows),
+            Command::NextGroup => {
+                self.list.jump_group(true, &rows);
+                self.load_more(ctx);
+            }
             Command::PrevGroup => self.list.jump_group(false, &rows),
             Command::Open => {
                 let (account, pr) = self.selected_pr(ctx)?;
@@ -600,6 +668,33 @@ impl Tab for PullsTab {
     }
 
     fn update(&mut self, action: &Action, ctx: &Ctx) {
+        if let Action::Data(DataEvent::PullsMore {
+            account,
+            scope,
+            view,
+            cursor,
+            result,
+        }) = action
+        {
+            if *scope != ctx.scope {
+                return;
+            }
+            if let Some(data) = self.data.get_mut(&(account.clone(), *view)) {
+                data.loading_more = false;
+                if let Some(loaded) = data
+                    .items
+                    .as_mut()
+                    .filter(|loaded| loaded.value.next.as_ref() == Some(cursor))
+                {
+                    match result {
+                        Ok(page) => Arc::make_mut(&mut loaded.value)
+                            .extend(page.clone(), |pr| &pr.reference),
+                        Err(e) => data.error = Some(e.clone()),
+                    }
+                }
+            }
+            self.restore_selection(ctx);
+        }
         if let Action::Data(DataEvent::Pulls {
             account,
             scope,
@@ -729,7 +824,7 @@ impl Tab for PullsTab {
             ));
             if let Some(e) = self.shown_data(ctx).find_map(|(_, d)| d.error.as_ref()) {
                 spans.push(Span::styled(
-                    format!("  ·  ! couldn't refresh ({e})"),
+                    format!("  ·  ! couldn't refresh ({})", chips::problem(e)),
                     Style::new().fg(t.warning),
                 ));
             }
@@ -880,6 +975,53 @@ mod tests {
         assert_eq!(Group::of(&pr, "you"), Group::NeedsYou);
     }
 
+    #[tokio::test]
+    async fn the_list_grows_near_its_end_and_says_how_much_is_left() {
+        let (mut tab, ctx, mut rx) = in_repo().await;
+        let view = tab.current().key();
+        let account = ctx.forges.iter().next().unwrap().account().clone();
+
+        // A list with more to come, as a long repository would have.
+        let data = tab.data.get_mut(&(account.clone(), view)).unwrap();
+        let loaded = data.items.as_mut().unwrap();
+        let cursor = hit_core::query::Cursor("1".to_owned());
+        let listing = Arc::make_mut(&mut loaded.value);
+        listing.next = Some(cursor.clone());
+        listing.total = Some(500);
+        loaded.fresh = true;
+        let shown = tab.visible(&ctx).len();
+        assert_eq!(tab.count_text(shown, &ctx), format!("{shown} / 500 "));
+
+        tab.command(Command::Bottom, &ctx);
+        assert!(tab.data[&(account.clone(), view)].loading_more);
+        assert!(tab.count_text(shown, &ctx).ends_with(" … "));
+
+        // Asked once, however often the cursor moves meanwhile.
+        let tasks = tab.tasks.len();
+        tab.command(Command::Up, &ctx);
+        tab.command(Command::Down, &ctx);
+        assert_eq!(tab.tasks.len(), tasks);
+
+        loop {
+            let action = rx.recv().await.unwrap();
+            let done = matches!(action, Action::Data(DataEvent::PullsMore { .. }));
+            tab.update(&action, &ctx);
+            if done {
+                break;
+            }
+        }
+        assert!(!tab.data[&(account, view)].loading_more);
+    }
+
+    #[tokio::test]
+    async fn a_filter_never_pages_through_everything() {
+        let (mut tab, ctx, _rx) = in_repo().await;
+        tab.filter = "x".to_owned();
+        let tasks = tab.tasks.len();
+        tab.command(Command::Bottom, &ctx);
+        assert_eq!(tab.tasks.len(), tasks);
+    }
+
     async fn in_repo() -> (PullsTab, Ctx, tokio::sync::mpsc::UnboundedReceiver<Action>) {
         let mut forges = Forges::new();
         forges.add(Arc::new(MockForge::demo(MockOptions::instant())));
@@ -941,7 +1083,11 @@ mod tests {
                 scope: Scope::All,
                 view: "involved",
                 result: Ok(Loaded {
-                    value: Arc::new(Vec::new()),
+                    value: Arc::new(Listing {
+                        items: Vec::new(),
+                        next: None,
+                        total: None,
+                    }),
                     fetched_at: hit_core::Timestamp::now(),
                     fresh: true,
                 }),

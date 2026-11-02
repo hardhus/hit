@@ -347,6 +347,7 @@ pub(crate) struct PageInfo {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SearchConnection {
+    pub issue_count: Option<u32>,
     pub page_info: Option<PageInfo>,
     #[serde(default)]
     pub nodes: Vec<Option<SearchNode>>,

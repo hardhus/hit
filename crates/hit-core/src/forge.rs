@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use zeroize::Zeroizing;
 
 use crate::{
-    AccountId, ForgeKind, ItemRef, RepoRef, Result,
+    AccountId, ForgeKind, ItemRef, RepoRef, Result, Timestamp,
     diff::Diff,
     focus::FocusItem,
     model::{
@@ -20,6 +20,29 @@ use crate::{
     },
     query::{IssueQuery, NotificationQuery, Page, PageRequest, PrQuery, Scope},
 };
+
+/// How much of a request budget is left.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RateLimit {
+    pub remaining: u32,
+    pub limit: u32,
+    pub reset_at: Option<Timestamp>,
+}
+
+impl RateLimit {
+    pub fn is_exhausted(&self) -> bool {
+        self.remaining == 0
+    }
+}
+
+/// What the forge last said about this account.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Health {
+    /// The token was rejected: the account needs a new sign-in.
+    pub token_rejected: bool,
+    /// Set only when running low, so there is something worth saying.
+    pub rate_limit: Option<RateLimit>,
+}
 
 pub trait Forge: Send + Sync {
     fn kind(&self) -> ForgeKind;
@@ -45,6 +68,10 @@ pub trait Forge: Send + Sync {
 
     fn repositories(&self) -> Option<&dyn Repositories> {
         None
+    }
+
+    fn health(&self) -> Health {
+        Health::default()
     }
 
     /// Whether this account refuses to write.
@@ -109,9 +136,6 @@ pub trait Repositories: Send + Sync {
     /// forges where they cost more than the list. Others report them with
     /// the repository and leave this empty.
     async fn open_counts(&self, _page: &PageRequest) -> Result<Page<RepoCounts>> {
-        Ok(Page {
-            items: Vec::new(),
-            next: None,
-        })
+        Ok(Page::last(Vec::new()))
     }
 }

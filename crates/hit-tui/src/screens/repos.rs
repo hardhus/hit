@@ -182,7 +182,7 @@ impl ReposTab {
         {
             vec![
                 Line::from(Span::styled("couldn't load repositories", bold(t.danger))),
-                Line::from(Span::styled(e.to_string(), Style::new().fg(t.muted))),
+                Line::from(Span::styled(chips::problem(e), Style::new().fg(t.muted))),
             ]
         } else if !self.filter.is_empty() {
             vec![Line::from(Span::styled(
@@ -370,7 +370,15 @@ impl Tab for ReposTab {
         frame.render_widget(Paragraph::new(Line::from(spans)), bar);
         frame.render_widget(
             Paragraph::new(Span::styled(
-                format!("{} shown ", rows.len()),
+                format!(
+                    "{}{} shown ",
+                    rows.len(),
+                    if rows.len() >= usize::from(sync::REPOS_SHOWN) {
+                        "+"
+                    } else {
+                        ""
+                    }
+                ),
                 Style::new().fg(t.muted),
             ))
             .alignment(Alignment::Right),
@@ -446,7 +454,7 @@ impl Tab for ReposTab {
             ));
             if let Some(e) = self.shown_data(ctx).find_map(|d| d.error.as_ref()) {
                 spans.push(Span::styled(
-                    format!("  ·  ! couldn't refresh ({e})"),
+                    format!("  ·  ! couldn't refresh ({})", chips::problem(e)),
                     Style::new().fg(t.warning),
                 ));
             }

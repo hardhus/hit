@@ -318,7 +318,7 @@ impl FocusTab {
                     "couldn't load Action Required",
                     bold(t.danger),
                 )),
-                Line::from(Span::styled(e.to_string(), Style::new().fg(t.muted))),
+                Line::from(Span::styled(chips::problem(e), Style::new().fg(t.muted))),
             ]
         } else {
             vec![
@@ -857,7 +857,8 @@ impl Tab for FocusTab {
             }
             (Some(focus), false, Some(e)) => spans.push(Span::styled(
                 format!(
-                    "! couldn't refresh ({e}) · data from {}",
+                    "! couldn't refresh ({}) · data from {}",
+                    chips::problem(e),
                     sync::ago(focus.fetched_at)
                 ),
                 Style::new().fg(t.warning),
@@ -873,9 +874,12 @@ impl Tab for FocusTab {
             (None, ..) => {}
         }
         if oldest.is_some() {
-            spans.push(Span::styled("  ·  ", Style::new().fg(t.border)));
-            spans.push(Span::styled(format!("{need}"), bold(t.accent_alt)));
-            spans.push(Span::styled(" need you", muted));
+            // After a failed refresh this number would be a guess.
+            if error.is_none() {
+                spans.push(Span::styled("  ·  ", Style::new().fg(t.border)));
+                spans.push(Span::styled(format!("{need}"), bold(t.accent_alt)));
+                spans.push(Span::styled(" need you", muted));
+            }
             if unread > 0 {
                 spans.push(Span::styled("  ·  ", Style::new().fg(t.border)));
                 spans.push(Span::styled(format!("{unread}"), bold(t.accent)));
@@ -969,6 +973,25 @@ mod tests {
             .map(|row| row.iter().map(|c| c.symbol()).collect::<String>())
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn status_text(tab: &FocusTab, ctx: &Ctx) -> String {
+        tab.status(ctx).iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[tokio::test]
+    async fn a_failed_refresh_claims_no_count() {
+        let (mut tab, ctx) = loaded_tab().await;
+        assert!(status_text(&tab, &ctx).contains("need you"));
+
+        let account = ctx.forges.iter().next().unwrap().account().clone();
+        let data = tab.accounts.get_mut(&account).unwrap();
+        data.refreshing = false;
+        data.error = Some(ForgeError::Unauthorized);
+
+        let text = status_text(&tab, &ctx);
+        assert!(!text.contains("need you"), "{text}");
+        assert!(text.contains("couldn't refresh (signed out)"), "{text}");
     }
 
     async fn loaded_tab() -> (FocusTab, Ctx) {

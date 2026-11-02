@@ -16,9 +16,9 @@ use hit_core::{
         Issue, IssueDetail, Notification, NotificationId, PullRequest, PullRequestDetail, Repo,
         RepoCounts,
     },
-    query::{IssueQuery, NotificationQuery, Page, PageRequest, PrQuery, Scope},
+    query::{Cursor, IssueQuery, NotificationQuery, Page, PageRequest, PrQuery, Scope},
 };
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::{sync::mpsc, task::JoinHandle};
 
 use crate::{Action, DataEvent, Theme, Toast, highlight::highlight_diff};
@@ -30,6 +30,38 @@ pub struct Loaded<T> {
     pub fetched_at: Timestamp,
     /// `false` when it came from the cache and has not been revalidated yet.
     pub fresh: bool,
+}
+
+/// A list as far as it has been loaded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Listing<T> {
+    pub items: Vec<T>,
+    /// Where the rest starts; `None` when this is all of it.
+    pub next: Option<Cursor>,
+    /// How many there are in all, when the forge says.
+    pub total: Option<u32>,
+}
+
+impl<T> std::ops::Deref for Listing<T> {
+    type Target = [T];
+
+    fn deref(&self) -> &[T] {
+        &self.items
+    }
+}
+
+impl<T> Listing<T> {
+    /// Adds the next page, leaving out what is already here.
+    pub fn extend(&mut self, page: Page<T>, id: impl Fn(&T) -> &ItemRef) {
+        let known: HashSet<ItemRef> = self.items.iter().map(|item| id(item).clone()).collect();
+        self.items.extend(
+            page.items
+                .into_iter()
+                .filter(|item| !known.contains(id(item))),
+        );
+        self.next = page.next;
+        self.total = page.total.or(self.total);
+    }
 }
 
 /// Fallback when the forge does not say how often to poll.
@@ -270,6 +302,8 @@ async fn count_unread(
 
 /// Pages fetched for the inbox (newest first, 50 per page).
 const INBOX_PAGES: usize = 4;
+/// The inbox shows this many, and says so when it is full.
+pub const INBOX_LIMIT: usize = INBOX_PAGES * 50;
 
 /// The inbox, at the forge's poll interval (once if `poll` is off). Unread
 /// and all notifications are cached separately.
@@ -383,6 +417,82 @@ pub fn spawn_mark_read(
     });
 }
 
+/// Pull requests and issues per page.
+const LIST_PAGE: u16 = 50;
+
+/// Only the search knows about requests to a team.
+fn mark_review_requests(query: &PrQuery, page: &mut Page<PullRequest>, login: &str) {
+    if query.reviewer.as_deref() == Some(login) {
+        for pr in &mut page.items {
+            pr.review_requested_of_viewer = true;
+        }
+    }
+}
+
+/// The next page of one query, for a list the user has scrolled down.
+pub fn spawn_more_pulls(
+    forge: Arc<dyn Forge>,
+    view: &'static str,
+    query: PrQuery,
+    cursor: Cursor,
+    tx: mpsc::UnboundedSender<Action>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let account = forge.account().clone();
+        let page = PageRequest::after(cursor.clone(), LIST_PAGE);
+        let result = match forge.pull_requests() {
+            Some(pulls) => pulls.list(&query, &page).await.map(|mut page| {
+                mark_review_requests(&query, &mut page, &account.login);
+                page
+            }),
+            None => Err(ForgeError::Unsupported("pull requests")),
+        };
+        let _ = tx.send(Action::Data(DataEvent::PullsMore {
+            account,
+            scope: query.scope,
+            view,
+            cursor,
+            result,
+        }));
+    })
+}
+
+/// See [`spawn_more_pulls`].
+pub fn spawn_more_issues(
+    forge: Arc<dyn Forge>,
+    view: &'static str,
+    query: IssueQuery,
+    cursor: Cursor,
+    tx: mpsc::UnboundedSender<Action>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let page = PageRequest::after(cursor.clone(), LIST_PAGE);
+        let result = match forge.issues() {
+            Some(issues) => issues.list(&query, &page).await,
+            None => Err(ForgeError::Unsupported("issues")),
+        };
+        let _ = tx.send(Action::Data(DataEvent::IssuesMore {
+            account: forge.account().clone(),
+            scope: query.scope,
+            view,
+            cursor,
+            result,
+        }));
+    })
+}
+
+/// A listing from overlapping queries; the last one is the main one, whose
+/// pages continue when the user scrolls.
+fn listing<T>(pages: Vec<Page<T>>, id: impl Fn(&T) -> &ItemRef) -> Listing<T> {
+    let next = pages.last().and_then(|page| page.next.clone());
+    let total = pages.last().and_then(|page| page.total);
+    Listing {
+        items: merged(pages, id),
+        next,
+        total,
+    }
+}
+
 /// One page of pull requests for a list view (cached per view).
 pub fn spawn_pulls(
     forge: Arc<dyn Forge>,
@@ -395,7 +505,7 @@ pub fn spawn_pulls(
         let store = store_for(cache, forge.as_ref());
         let account = forge.account().clone();
         let scope = queries.first().map(|q| q.scope.clone()).unwrap_or_default();
-        let send = |result: Result<Loaded<Vec<PullRequest>>, ForgeError>| {
+        let send = |result: Result<Loaded<Listing<PullRequest>>, ForgeError>| {
             let _ = tx.send(Action::Data(DataEvent::Pulls {
                 account: account.clone(),
                 scope: scope.clone(),
@@ -410,19 +520,14 @@ pub fn spawn_pulls(
         let fetch = || async {
             match forge.pull_requests() {
                 Some(pulls) => {
-                    let page = PageRequest::first(50);
+                    let page = PageRequest::first(LIST_PAGE);
                     try_join_all(queries.iter().map(|query| pulls.list(query, &page)))
                         .await
                         .map(|mut pages| {
-                            // Only the search knows about requests to a team.
                             for (query, page) in queries.iter().zip(&mut pages) {
-                                if query.reviewer.as_deref() == Some(account.login.as_str()) {
-                                    for pr in &mut page.items {
-                                        pr.review_requested_of_viewer = true;
-                                    }
-                                }
+                                mark_review_requests(query, page, &account.login);
                             }
-                            merged(pages, |pr| &pr.reference)
+                            listing(pages, |pr| &pr.reference)
                         })
                 }
                 None => Err(ForgeError::Unsupported("pull requests")),
@@ -445,7 +550,7 @@ pub fn spawn_issues(
         let store = store_for(cache, forge.as_ref());
         let account = forge.account().clone();
         let scope = queries.first().map(|q| q.scope.clone()).unwrap_or_default();
-        let send = |result: Result<Loaded<Vec<Issue>>, ForgeError>| {
+        let send = |result: Result<Loaded<Listing<Issue>>, ForgeError>| {
             let _ = tx.send(Action::Data(DataEvent::Issues {
                 account: account.clone(),
                 scope: scope.clone(),
@@ -460,10 +565,10 @@ pub fn spawn_issues(
         let fetch = || async {
             match forge.issues() {
                 Some(issues) => {
-                    let page = PageRequest::first(50);
+                    let page = PageRequest::first(LIST_PAGE);
                     try_join_all(queries.iter().map(|query| issues.list(query, &page)))
                         .await
-                        .map(|pages| merged(pages, |issue| &issue.reference))
+                        .map(|pages| listing(pages, |issue| &issue.reference))
                 }
                 None => Err(ForgeError::Unsupported("issues")),
             }
@@ -474,7 +579,8 @@ pub fn spawn_issues(
 }
 
 const REPOS_KEY: &str = "repos:mine";
-const REPOS_SHOWN: u16 = 100;
+/// The Repos tab shows this many, and says so when there are more.
+pub const REPOS_SHOWN: u16 = 100;
 /// Open counts are slow: short pages, so the top of the list fills in first.
 const REPO_COUNTS_PER_PAGE: u16 = 25;
 const REPO_COUNTS_PAGES: usize = 4;
@@ -886,6 +992,44 @@ mod tests {
         };
         assert!(toast.message.contains("syntax error"), "{}", toast.message);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "[ui");
+    }
+
+    #[tokio::test]
+    async fn a_list_continues_where_it_stopped() {
+        let query = PrQuery::default;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let forge = demo();
+        let first = forge
+            .pull_requests()
+            .unwrap()
+            .list(&query(), &PageRequest::first(2))
+            .await
+            .unwrap();
+        let cursor = first.next.clone().unwrap();
+        let mut list = listing(vec![first], |pr: &PullRequest| &pr.reference);
+        assert_eq!(list.len(), 2);
+        assert!(list.total.unwrap() > 2);
+
+        spawn_more_pulls(Arc::clone(&forge), "test", query(), cursor.clone(), tx)
+            .await
+            .unwrap();
+        let events = focus_events(&mut rx, 1).await;
+        let DataEvent::PullsMore {
+            result: Ok(page),
+            cursor: asked,
+            ..
+        } = &events[0]
+        else {
+            panic!("expected the next page: {events:?}");
+        };
+        assert_eq!(asked, &cursor);
+        list.extend(page.clone(), |pr| &pr.reference);
+        assert!(list.len() > 2);
+
+        // Overlap, as when the list changed in between, repeats nothing.
+        let before = list.len();
+        list.extend(page.clone(), |pr| &pr.reference);
+        assert_eq!(list.len(), before);
     }
 
     #[test]
