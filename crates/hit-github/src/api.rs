@@ -545,6 +545,14 @@ impl Api {
         if path.starts_with('/') || path.contains("://") || path.contains('\\') {
             return Err(bad());
         }
+        // `..` stays inside the API origin but reaches another endpoint.
+        let segments = path.split(['?', '#']).next().unwrap_or_default().split('/');
+        if segments
+            .into_iter()
+            .any(|segment| matches!(segment, "" | "." | ".."))
+        {
+            return Err(bad());
+        }
         let url = self.host.api().join(path).map_err(|_| bad())?;
         let base = self.host.api();
         let same_origin = url.scheme() == base.scheme()
@@ -801,6 +809,33 @@ mod tests {
 
     fn in_an_hour() -> i64 {
         Timestamp::now().as_second() + 3600
+    }
+
+    #[tokio::test]
+    async fn a_path_cannot_reach_another_endpoint() {
+        let server = MockServer::start().await;
+        let api = api(&server, ApiOptions::default()).await;
+        for path in [
+            "repos/a/b/git/refs/heads/../../x",
+            "repos/a/../../user",
+            "..",
+            "./user",
+            "repos//a",
+            "repos/a/",
+        ] {
+            assert!(
+                matches!(
+                    api.send(Method::GET, path, Op::Read).await,
+                    Err(ForgeError::InvalidResponse(_))
+                ),
+                "{path}"
+            );
+        }
+        assert!(server.received_requests().await.unwrap().is_empty());
+
+        // A query may hold anything.
+        assert!(api.url("search?q=a/../b").is_ok());
+        assert!(api.url("repos/a.b/c..d/pulls").is_ok());
     }
 
     #[tokio::test]

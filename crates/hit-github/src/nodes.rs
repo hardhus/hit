@@ -7,8 +7,8 @@ use hit_core::{
     Host, ItemRef, RepoRef, Timestamp,
     model::{
         CheckRun, CheckState, CheckSummary, CloseReason, Comment, Issue, IssueState, Label,
-        Mergeable, PrState, PullRequest, RepoCounts, Review, ReviewDecision, ReviewState,
-        ReviewThread, Rgb, User,
+        MergeMethod, MergeOptions, Mergeable, PrState, PullRequest, RepoCounts, Review,
+        ReviewDecision, ReviewState, ReviewThread, Rgb, User,
     },
 };
 use serde::Deserialize;
@@ -27,6 +27,7 @@ pub(crate) mod queries {
         include_str!("graphql/fragments.graphql")
     );
     pub const REPO_COUNTS: &str = include_str!("graphql/repo_counts.graphql");
+    pub const MERGE_OPTIONS: &str = include_str!("graphql/merge_options.graphql");
     pub const ISSUE: &str = concat!(
         include_str!("graphql/issue.graphql"),
         include_str!("graphql/fragments.graphql")
@@ -523,6 +524,85 @@ pub(crate) fn check_runs(connection: Option<Nodes<ContextsWrap>>) -> Vec<CheckRu
             ContextNode::Other => None,
         })
         .collect()
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MergePull {
+    state: String,
+    is_draft: bool,
+    is_cross_repository: bool,
+    merge_state_status: String,
+    head_ref_name: String,
+    base_ref_name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MergeRepo {
+    merge_commit_allowed: bool,
+    squash_merge_allowed: bool,
+    rebase_merge_allowed: bool,
+    viewer_default_merge_method: Option<String>,
+    pull_request: Option<MergePull>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct MergeData {
+    pub repository: Option<MergeRepo>,
+}
+
+impl MergeRepo {
+    pub fn into_model(self) -> Option<MergeOptions> {
+        let pull = self.pull_request?;
+        let mut allowed = Vec::new();
+        for (on, method) in [
+            (self.merge_commit_allowed, MergeMethod::Merge),
+            (self.squash_merge_allowed, MergeMethod::Squash),
+            (self.rebase_merge_allowed, MergeMethod::Rebase),
+        ] {
+            if on {
+                allowed.push(method);
+            }
+        }
+        let preferred = match self.viewer_default_merge_method.as_deref() {
+            Some("SQUASH") => Some(MergeMethod::Squash),
+            Some("REBASE") => Some(MergeMethod::Rebase),
+            Some("MERGE") => Some(MergeMethod::Merge),
+            _ => None,
+        };
+        let default = preferred
+            .filter(|method| allowed.contains(method))
+            .or_else(|| allowed.first().copied())?;
+
+        let blocked = if pull.state != "OPEN" {
+            Some("it is no longer open")
+        } else if pull.is_draft {
+            Some("it is still a draft")
+        } else {
+            match pull.merge_state_status.as_str() {
+                "DIRTY" => Some("it has conflicts with the base branch"),
+                "BLOCKED" => Some("required reviews or checks are missing"),
+                "DRAFT" => Some("it is still a draft"),
+                _ => None,
+            }
+        };
+        let warning = match pull.merge_state_status.as_str() {
+            "UNSTABLE" => Some("some checks are failing"),
+            "BEHIND" => Some("the branch is behind its base"),
+            "UNKNOWN" => Some("GitHub is still working out whether it can merge"),
+            _ => None,
+        };
+        Some(MergeOptions {
+            allowed,
+            default,
+            blocked: blocked.map(str::to_owned),
+            warning: warning.map(str::to_owned),
+            head_ref: pull.head_ref_name,
+            base_ref: pull.base_ref_name,
+            can_delete_branch: !pull.is_cross_repository,
+        })
+    }
 }
 
 /// The latest comments of a conversation and how many there are in all.

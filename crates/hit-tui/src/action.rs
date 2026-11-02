@@ -6,7 +6,8 @@ use hit_core::{
     auth::DeviceCode,
     focus::FocusItem,
     model::{
-        Issue, IssueDetail, Notification, NotificationId, PullRequest, PullRequestDetail, Repo,
+        Issue, IssueDetail, MergeOptions, Notification, NotificationId, PullRequest,
+        PullRequestDetail, Repo, ReviewVerdict,
     },
     query::{Cursor, Page, Scope},
 };
@@ -14,7 +15,8 @@ use hit_core::{
 use crate::{
     highlight::HighlightedDiff,
     keymap::Command,
-    sync::{Listing, Loaded},
+    sync::{ItemOp, Listing, Loaded},
+    views::Facts,
 };
 
 /// Something the app should do. Views return actions from input handling, and
@@ -45,9 +47,13 @@ pub enum Action {
     /// Open the settings screen.
     OpenSettings,
     /// What can be done with this item.
-    OpenActions(Target),
-    /// Write a comment.
-    Compose(Target),
+    OpenActions(Target, Facts),
+    /// Write a comment or a review.
+    Compose(Target, Purpose),
+    /// Ask before merging.
+    OpenMerge(Target),
+    /// Do it now: nothing to ask or to write.
+    Perform(Target, ItemOp),
     /// Leave the comment box, keeping `draft` for next time.
     CloseCompose {
         target: Target,
@@ -59,6 +65,13 @@ pub enum Action {
     EditorDone(Result<String, String>),
     /// A setting changed: apply it now.
     ConfigChanged(ConfigChange),
+}
+
+/// What a text box is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Purpose {
+    Comment,
+    Review(ReviewVerdict),
 }
 
 /// A pull request or issue, and the account to act with.
@@ -84,9 +97,15 @@ pub enum DataEvent {
     /// Something was changed on the forge.
     ActionDone {
         target: Target,
-        /// For the message: "commented".
-        what: &'static str,
+        /// What to tell the user if it worked.
+        message: String,
         result: Result<(), ForgeError>,
+    },
+    /// Long enough after a change for the forge's search to have caught up.
+    Settled,
+    MergeOptions {
+        target: Target,
+        result: Result<MergeOptions, ForgeError>,
     },
     Focus {
         account: AccountId,

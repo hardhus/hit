@@ -10,27 +10,28 @@ use std::{
 
 use async_trait::async_trait;
 use hit_core::{
-    AccountId, Focus, Forge, ForgeError, ForgeKind, Issues, ItemActions, ItemRef, Notifications,
-    PullRequests, RepoRef, Repositories, Result, Timestamp,
+    AccountId, Focus, Forge, ForgeError, ForgeKind, Issues, ItemActions, ItemKind, ItemRef,
+    Notifications, PullRequests, RepoRef, Repositories, Result, Timestamp,
     diff::Diff,
     focus::{self, FocusItem, FocusReason, FocusSubject},
     model::{
-        Issue, IssueDetail, Notification, NotificationId, PullRequest, PullRequestDetail, Repo,
-        RepoCounts,
+        CloseReason, Issue, IssueDetail, MergeMethod, MergeOptions, Notification, NotificationId,
+        PullRequest, PullRequestDetail, Repo, RepoCounts, ReviewVerdict,
     },
     query::{
         Cursor, IssueQuery, NotificationQuery, Page, PageRequest, PrQuery, Scope, Sort, StateFilter,
     },
 };
 use reqwest::Method;
+use serde::Deserialize;
 use serde_json::json;
 
 use crate::{
     Api,
     api::Op,
     nodes::{
-        self, FocusData, IssueData, PullData, ReposData, SearchConnection, SearchData, SearchNode,
-        queries,
+        self, FocusData, IssueData, MergeData, MergeRepo, PullData, ReposData, SearchConnection,
+        SearchData, SearchNode, queries,
     },
     rest::{NotificationJson, RepoJson, repo_path, thread_id},
 };
@@ -449,6 +450,164 @@ impl ItemActions for GithubForge {
             .await?;
         Ok(())
     }
+
+    async fn review(&self, item: &ItemRef, verdict: ReviewVerdict, body: &str) -> Result<()> {
+        let event = match verdict {
+            ReviewVerdict::Approve => "APPROVE",
+            ReviewVerdict::RequestChanges => "REQUEST_CHANGES",
+        };
+        let path = format!(
+            "repos/{}/pulls/{}/reviews",
+            repo_path(&item.repo)?,
+            item.number
+        );
+        self.api
+            .send_json(
+                Method::POST,
+                &path,
+                Op::Write,
+                &json!({ "event": event, "body": body }),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn merge_options(&self, item: &ItemRef) -> Result<MergeOptions> {
+        repo_path(&item.repo)?;
+        let data: MergeData = self
+            .api
+            .graphql(
+                queries::MERGE_OPTIONS,
+                json!({ "owner": item.repo.owner, "name": item.repo.name, "number": item.number }),
+            )
+            .await?;
+        data.repository
+            .and_then(MergeRepo::into_model)
+            .ok_or(ForgeError::NotFound)
+    }
+
+    async fn merge(&self, item: &ItemRef, method: MergeMethod) -> Result<()> {
+        let method = match method {
+            MergeMethod::Merge => "merge",
+            MergeMethod::Squash => "squash",
+            MergeMethod::Rebase => "rebase",
+        };
+        let path = format!(
+            "repos/{}/pulls/{}/merge",
+            repo_path(&item.repo)?,
+            item.number
+        );
+        self.api
+            .send_json(
+                Method::PUT,
+                &path,
+                Op::Write,
+                &json!({ "merge_method": method }),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn delete_branch(&self, item: &ItemRef, branch: &str) -> Result<()> {
+        // Anything else would change what the address means.
+        if !branch
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '/'))
+        {
+            return Err(ForgeError::Rejected(format!(
+                "hit does not delete a branch named {branch:?}; do it on GitHub"
+            )));
+        }
+        let path = format!("repos/{}/git/refs/heads/{branch}", repo_path(&item.repo)?);
+        match self.api.send(Method::DELETE, &path, Op::Write).await {
+            // The repository may delete merged branches by itself.
+            Err(ForgeError::Rejected(message)) if message.contains("does not exist") => Ok(()),
+            result => result.map(|_| ()),
+        }
+    }
+
+    async fn set_open(
+        &self,
+        item: &ItemRef,
+        open: bool,
+        reason: Option<CloseReason>,
+    ) -> Result<()> {
+        let kind = match item.kind {
+            ItemKind::PullRequest => "pulls",
+            ItemKind::Issue => "issues",
+        };
+        let path = format!("repos/{}/{kind}/{}", repo_path(&item.repo)?, item.number);
+        let mut body = json!({ "state": if open { "open" } else { "closed" } });
+        if item.kind == ItemKind::Issue
+            && let Some(reason) = reason
+        {
+            body["state_reason"] = json!(match reason {
+                CloseReason::Completed => "completed",
+                CloseReason::NotPlanned => "not_planned",
+                CloseReason::Duplicate => "duplicate",
+            });
+        }
+        self.api
+            .send_json(Method::PATCH, &path, Op::Write, &body)
+            .await?;
+        Ok(())
+    }
+
+    async fn rerun_failed(&self, item: &ItemRef) -> Result<usize> {
+        let repo = repo_path(&item.repo)?;
+        let pull: PullHead = self
+            .api
+            .get_json(&format!("repos/{repo}/pulls/{}", item.number))
+            .await?;
+        if !pull.head.sha.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(ForgeError::InvalidResponse(
+                "unexpected commit id".to_owned(),
+            ));
+        }
+        let runs: WorkflowRuns = self
+            .api
+            .get_json(&format!(
+                "repos/{repo}/actions/runs?head_sha={}&status=failure&per_page=20",
+                pull.head.sha
+            ))
+            .await?;
+        if runs.workflow_runs.is_empty() {
+            return Err(ForgeError::Rejected(
+                "no failed GitHub Actions runs on this pull request".to_owned(),
+            ));
+        }
+        for run in &runs.workflow_runs {
+            self.api
+                .send(
+                    Method::POST,
+                    &format!("repos/{repo}/actions/runs/{}/rerun-failed-jobs", run.id),
+                    Op::Write,
+                )
+                .await?;
+        }
+        Ok(runs.workflow_runs.len())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct PullHead {
+    head: HeadCommit,
+}
+
+#[derive(Debug, Deserialize)]
+struct HeadCommit {
+    sha: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkflowRuns {
+    #[serde(default)]
+    workflow_runs: Vec<WorkflowRun>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkflowRun {
+    id: u64,
 }
 
 #[async_trait]

@@ -29,6 +29,46 @@ pub enum Mergeable {
     Unknown,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MergeMethod {
+    Merge,
+    Squash,
+    Rebase,
+}
+
+impl MergeMethod {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Merge => "merge commit",
+            Self::Squash => "squash",
+            Self::Rebase => "rebase",
+        }
+    }
+}
+
+/// What the forge says about merging a pull request right now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergeOptions {
+    /// Never empty.
+    pub allowed: Vec<MergeMethod>,
+    pub default: MergeMethod,
+    /// Why it cannot be merged.
+    pub blocked: Option<String>,
+    /// It can be merged, but this is worth knowing first.
+    pub warning: Option<String>,
+    pub head_ref: String,
+    pub base_ref: String,
+    /// The branch is in this repository, not in a fork.
+    pub can_delete_branch: bool,
+}
+
+/// A review's answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewVerdict {
+    Approve,
+    RequestChanges,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PullRequest {
     pub reference: ItemRef,

@@ -25,6 +25,7 @@ use crate::{
     screens::{issue_fields, spinner},
     sync::{self, Loaded},
     ui::chips::{self, bold},
+    views::Facts,
 };
 
 const FADE: Duration = Duration::from_millis(160);
@@ -152,10 +153,17 @@ impl View for IssueView {
             Command::Back => return Some(Action::Back),
             Command::Quit => return Some(Action::Quit),
             Command::Actions => {
-                return Some(Action::OpenActions(Target {
-                    account: self.account.clone(),
-                    item: self.item.clone(),
-                }));
+                let facts = self
+                    .issue()
+                    .map(|issue| Facts::of_issue(issue, &self.account.login))
+                    .unwrap_or_default();
+                return Some(Action::OpenActions(
+                    Target {
+                        account: self.account.clone(),
+                        item: self.item.clone(),
+                    },
+                    facts,
+                ));
             }
             Command::Down => self.scroll = self.scroll.saturating_add(1),
             Command::Up => self.scroll = self.scroll.saturating_sub(1),

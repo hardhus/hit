@@ -30,6 +30,7 @@ use crate::{
         chips::{self, bold},
         tabs::{TabBar, TabSpec},
     },
+    views::Facts,
 };
 
 use super::thread;
@@ -821,10 +822,17 @@ impl View for PullView {
             Command::Back => return Some(Action::Back),
             Command::Quit => return Some(Action::Quit),
             Command::Actions => {
-                return Some(Action::OpenActions(Target {
-                    account: self.account.clone(),
-                    item: self.item.clone(),
-                }));
+                let facts = self
+                    .pr()
+                    .map(|pr| Facts::of_pull(pr, &self.account.login))
+                    .unwrap_or_default();
+                return Some(Action::OpenActions(
+                    Target {
+                        account: self.account.clone(),
+                        item: self.item.clone(),
+                    },
+                    facts,
+                ));
             }
             Command::Tab1 => self.switch(0, ctx),
             Command::Tab2 => self.switch(1, ctx),
@@ -890,6 +898,7 @@ impl View for PullView {
                 result: Ok(()),
                 ..
             }) if target.item == self.item => self.mount(ctx),
+            Action::Data(DataEvent::Settled) => self.mount(ctx),
             Action::Data(DataEvent::PullDetail { item, result }) if *item == self.item => {
                 match result {
                     Ok(loaded) => {

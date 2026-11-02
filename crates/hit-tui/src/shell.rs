@@ -143,7 +143,7 @@ impl Shell {
                     .get(self.active)
                     .and_then(|tab| tab.action_target(ctx))
                 {
-                    Some(target) => return Some(Action::OpenActions(target)),
+                    Some((target, facts)) => return Some(Action::OpenActions(target, facts)),
                     None => self
                         .toasts
                         .push(Toast::info("select a pull request or an issue")),
@@ -526,7 +526,9 @@ impl View for Shell {
             })),
             Action::ConfigChanged(change) if change.reload => self.reload_pending = true,
             // What was changed shows up everywhere it is listed.
-            Action::Data(crate::DataEvent::ActionDone { result: Ok(()), .. }) => {
+            Action::Data(
+                crate::DataEvent::ActionDone { result: Ok(()), .. } | crate::DataEvent::Settled,
+            ) => {
                 for tab in &mut self.tabs {
                     tab.mount(ctx);
                 }

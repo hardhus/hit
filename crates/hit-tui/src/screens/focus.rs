@@ -30,6 +30,7 @@ use crate::{
         chips::{self, bold},
         list::{ItemList, ListState, Row},
     },
+    views::Facts,
 };
 
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -935,12 +936,19 @@ impl Tab for FocusTab {
         entering || gliding || spinning
     }
 
-    fn action_target(&self, ctx: &Ctx) -> Option<Target> {
+    fn action_target(&self, ctx: &Ctx) -> Option<(Target, Facts)> {
         let (account, item) = self.selected_item(ctx)?;
-        Some(Target {
-            account,
-            item: item.subject.reference().clone(),
-        })
+        let facts = match &item.subject {
+            FocusSubject::PullRequest(pr) => Facts::of_pull(pr, &account.login),
+            FocusSubject::Issue(issue) => Facts::of_issue(issue, &account.login),
+        };
+        Some((
+            Target {
+                account,
+                item: item.subject.reference().clone(),
+            },
+            facts,
+        ))
     }
 
     fn shown(&mut self) {

@@ -19,7 +19,10 @@ pub use comment::{Comment, ReviewThread};
 pub use issue::{CloseReason, Issue, IssueDetail, IssueState};
 pub use label::{Label, Rgb};
 pub use notification::{Notification, NotificationId, NotificationReason, Subject, SubjectKind};
-pub use pull::{Mergeable, PrState, PullRequest, PullRequestDetail, ReviewDecision};
+pub use pull::{
+    MergeMethod, MergeOptions, Mergeable, PrState, PullRequest, PullRequestDetail, ReviewDecision,
+    ReviewVerdict,
+};
 pub use repo::{Repo, RepoCounts};
 pub use review::{Review, ReviewState};
 pub use user::User;

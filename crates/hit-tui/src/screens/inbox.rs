@@ -34,6 +34,7 @@ use crate::{
         list::{ItemList, ListState, Row},
         popup::Popup,
     },
+    views::Facts,
 };
 
 const ENTRANCE: Duration = Duration::from_millis(700);
@@ -915,12 +916,16 @@ impl Tab for InboxTab {
         entering || gliding || popping || spinning
     }
 
-    fn action_target(&self, ctx: &Ctx) -> Option<Target> {
+    fn action_target(&self, ctx: &Ctx) -> Option<(Target, Facts)> {
         let (account, n) = self.selected(ctx)?;
-        Some(Target {
-            account,
-            item: n.subject.item?,
-        })
+        let facts = Facts::default();
+        Some((
+            Target {
+                account,
+                item: n.subject.item?,
+            },
+            facts,
+        ))
     }
 
     fn shown(&mut self) {
