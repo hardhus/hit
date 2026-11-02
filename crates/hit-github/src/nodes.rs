@@ -286,6 +286,7 @@ pub(crate) struct IssueNode {
     number: u64,
     title: String,
     url: String,
+    #[serde(rename = "issueState")]
     state: String,
     state_reason: Option<String>,
     created_at: Timestamp,

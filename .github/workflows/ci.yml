@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, develop]
+    branches: [main, develop, 'phase/**']
   pull_request:
 
 env:
@@ -23,7 +23,11 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - uses: extractions/setup-just@v2
-      - run: just check
+      - run: just fmt-check
+      - run: just lint
+      # Even when a lint fails: one problem must not hide another.
+      - if: ${{ !cancelled() }}
+        run: just test
 
   msrv:
     name: msrv
@@ -39,6 +43,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: rustsec/audit-check@v2
+      - uses: taiki-e/install-action@v2
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          tool: cargo-audit
+      - run: cargo audit
+
+  graphql:
+    name: graphql
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: extractions/setup-just@v2
+      - run: just graphql

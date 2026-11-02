@@ -50,7 +50,8 @@ fragment Iss on Issue {
   number
   title
   url
-  state
+  # Aliased: Pr has a `state` of another type, and one search returns both.
+  issueState: state
   stateReason
   createdAt
   updatedAt

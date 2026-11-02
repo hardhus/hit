@@ -60,7 +60,9 @@ pub fn token_from_gh(program: &OsStr, host: &Host) -> Result<Secret, GhError> {
     Secret::new(stdout).map_err(|_| GhError::Invalid)
 }
 
-#[cfg(all(test, unix))]
+// Two attributes: clippy only treats a plain `cfg(test)` as test code.
+#[cfg(test)]
+#[cfg(unix)]
 mod tests {
     use std::{fs, os::unix::fs::PermissionsExt};
 
