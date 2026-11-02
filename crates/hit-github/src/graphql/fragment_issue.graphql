@@ -1,0 +1,16 @@
+fragment Iss on Issue {
+  number
+  title
+  url
+  # Aliased: Pr has a `state` of another type, and one search returns both.
+  issueState: state
+  stateReason
+  createdAt
+  updatedAt
+  closedAt
+  author { __typename login }
+  repository { name owner { login } }
+  labels(first: 10) { nodes { name color description } }
+  assignees(first: 10) { nodes { login } }
+  comments { totalCount }
+}

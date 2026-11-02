@@ -8,6 +8,7 @@ use tokio::{sync::mpsc, time::MissedTickBehavior};
 use crate::{
     Action, Ctx, DataEvent, Event, Services, TuiError, View,
     action::{Detail, Toast},
+    browser,
     event::EventSource,
     external_editor,
     keymap::Keymap,
@@ -20,6 +21,67 @@ use crate::{
         SettingsView, Welcome,
     },
 };
+
+/// One step of [`screens`] and what the screen showed after it.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Screen {
+    pub step: String,
+    pub text: String,
+}
+
+/// Runs the real app with no terminal: presses `steps` in order and returns the
+/// screen after each, once nothing has happened for `quiet`. A step is a key
+/// (`j`, `enter`, `ctrl+s`), `=text` to type it, or `wait:5` for five seconds.
+/// Keys do what they do in hit, writing included; links are only announced.
+pub async fn screens(
+    config: &Config,
+    services: Services,
+    steps: &[String],
+    width: u16,
+    height: u16,
+    quiet: Duration,
+) -> Result<Vec<Screen>, String> {
+    browser::rehearse();
+    let mut config = config.clone();
+    config.ui.animations = false;
+    let (keymap, _) = Keymap::from_config(&config.keys);
+    let mut app = App::new(&config, services, keymap);
+    if app.ctx.forges.is_empty() {
+        app.push(Box::new(Welcome::new(Vec::new())));
+    } else {
+        app.push(Box::new(Shell::new(Vec::new())));
+    }
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height))
+        .map_err(|e| e.to_string())?;
+    let mut shots = Vec::with_capacity(steps.len() + 1);
+    app.settle(quiet).await;
+    shots.push(app.shot("start", &mut terminal)?);
+    for step in steps {
+        if let Some(seconds) = step.strip_prefix("wait:") {
+            let seconds: u64 = seconds
+                .parse()
+                .map_err(|_| format!("{step}: not a number of seconds"))?;
+            app.settle(Duration::from_secs(seconds)).await;
+        } else if let Some(text) = step.strip_prefix('=') {
+            for c in text.chars() {
+                let key = KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+                app.on_event(&Event::Key(key));
+            }
+        } else {
+            let key = crate::keymap::Key::parse(step).map_err(|e| e.to_string())?;
+            app.on_event(&Event::Key(key.to_event()));
+        }
+        if app.editing.take().is_some() {
+            return Err(format!("{step}: the editor needs a real terminal"));
+        }
+        app.settle(quiet).await;
+        shots.push(app.shot(step, &mut terminal)?);
+        if app.quit {
+            break;
+        }
+    }
+    Ok(shots)
+}
 
 /// Runs the TUI until the user quits or a shutdown signal arrives.
 pub async fn run(
@@ -41,6 +103,9 @@ pub async fn run(
     }
     app.run().await
 }
+
+/// However busy a screen stays, a step of [`screens`] ends after this.
+const SETTLE_LIMIT: Duration = Duration::from_secs(60);
 
 pub struct App {
     views: Vec<Box<dyn View>>,
@@ -155,20 +220,50 @@ impl App {
             views, ctx, toasts, ..
         } = self;
         toasts.prune();
-        terminal::draw_guarded(|| {
-            term.draw(|frame| {
-                render(frame, views, ctx);
-                // Under a view without toasts, the shell's cannot be seen.
-                if !views.last().is_some_and(|view| view.shows_toasts()) {
-                    let area = frame.area();
-                    toasts.render(frame, area, &ctx.theme);
-                }
-                crate::ui::scrub(frame.buffer_mut());
+        terminal::draw_guarded(|| term.draw(|frame| paint(frame, views, ctx, toasts)))
+            .ok_or(TuiError::Panicked)?
+            .map(|_| ())
+            .map_err(TuiError::Draw)
+    }
+
+    /// Handles what comes in until nothing has for `quiet`.
+    async fn settle(&mut self, quiet: Duration) {
+        let limit = tokio::time::Instant::now() + SETTLE_LIMIT;
+        while tokio::time::Instant::now() < limit {
+            match tokio::time::timeout(quiet, self.actions.recv()).await {
+                Ok(Some(action)) => self.on_action(action),
+                Ok(None) | Err(_) => break,
+            }
+        }
+    }
+
+    fn shot(
+        &mut self,
+        step: &str,
+        terminal: &mut ratatui::Terminal<ratatui::backend::TestBackend>,
+    ) -> Result<Screen, String> {
+        let Self {
+            views, ctx, toasts, ..
+        } = self;
+        toasts.prune();
+        terminal
+            .draw(|frame| paint(frame, views, ctx, toasts))
+            .map_err(|e| e.to_string())?;
+        let buffer = terminal.backend().buffer();
+        let width = usize::from(buffer.area.width);
+        let text = buffer
+            .content()
+            .chunks(width)
+            .map(|row| {
+                let line: String = row.iter().map(|cell| cell.symbol()).collect();
+                line.trim_end().to_owned()
             })
+            .collect::<Vec<_>>()
+            .join("\n");
+        Ok(Screen {
+            step: step.to_owned(),
+            text,
         })
-        .ok_or(TuiError::Panicked)?
-        .map(|_| ())
-        .map_err(TuiError::Draw)
     }
 
     fn on_event(&mut self, event: &Event) {
@@ -259,7 +354,9 @@ impl App {
                     self.ctx.drafts.remove(&target.item);
                 } else {
                     self.ctx.drafts.insert(target.item.clone(), draft.clone());
-                    self.toasts.push(Toast::info("draft kept for this item"));
+                    self.views.pop();
+                    self.on_action(Action::Toast(Toast::info("draft kept for this item")));
+                    return;
                 }
                 self.views.pop();
                 self.dirty = true;
@@ -288,6 +385,7 @@ impl App {
                 if let Action::Toast(toast) = &action {
                     self.toasts.push(toast.clone());
                 }
+                let mut follow_ups = Vec::new();
                 if let Action::Data(DataEvent::ActionDone {
                     message,
                     result,
@@ -297,20 +395,19 @@ impl App {
                     match result {
                         Ok(()) => {
                             self.ctx.drafts.remove(&target.item);
-                            self.toasts.push(Toast::success(message.clone()));
+                            follow_ups.push(Action::Toast(Toast::success(message.clone())));
                             sync::after_search_catches_up(self.ctx.sender());
                         }
                         // A box or the merge question says it itself.
                         Err(e) if !self.views.last().is_some_and(|v| v.is_overlay()) => {
-                            self.toasts.push(Toast::error(format!(
+                            follow_ups.push(Action::Toast(Toast::error(format!(
                                 "couldn't change {}: {e}",
                                 target.item
-                            )));
+                            ))));
                         }
                         Err(_) => {}
                     }
                 }
-                let mut follow_ups = Vec::new();
                 for view in &mut self.views {
                     follow_ups.extend(view.update(&action, &self.ctx));
                 }
@@ -405,6 +502,17 @@ impl App {
     }
 }
 
+/// Everything on one frame.
+fn paint(frame: &mut Frame, views: &mut [Box<dyn View>], ctx: &Ctx, toasts: &Toasts) {
+    render(frame, views, ctx);
+    // Under a view without toasts, the shell's cannot be seen.
+    if !views.last().is_some_and(|view| view.shows_toasts()) {
+        let area = frame.area();
+        toasts.render(frame, area, &ctx.theme);
+    }
+    crate::ui::scrub(frame.buffer_mut());
+}
+
 fn frame_interval(config: &Config) -> Duration {
     Duration::from_secs_f64(1.0 / f64::from(config.ui.max_fps.max(1)))
 }
@@ -475,5 +583,103 @@ async fn ctrl_c() {
     if let Err(e) = tokio::signal::ctrl_c().await {
         tracing::warn!(error = %e, "could not listen for ctrl+c");
         std::future::pending::<()>().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use hit_core::{Forge, Forges, Host, ItemRef, RepoRef};
+    use hit_forge_mock::{DEMO_HOST, MockForge, MockOptions};
+
+    use super::*;
+
+    const QUIET: Duration = Duration::from_millis(60);
+
+    fn rocket() -> RepoRef {
+        RepoRef::new(Host::new(DEMO_HOST), "acme", "rocket")
+    }
+
+    async fn run(forge: &Arc<MockForge>, steps: &[&str]) -> Vec<Screen> {
+        let mut forges = Forges::new();
+        forges.add(Arc::clone(forge) as Arc<dyn Forge>);
+        let steps: Vec<String> = steps.iter().map(|s| (*s).to_owned()).collect();
+        let services = Services {
+            forges,
+            repo: Some(rocket()),
+            ..Services::default()
+        };
+        screens(&Config::default(), services, &steps, 120, 40, QUIET)
+            .await
+            .unwrap()
+    }
+
+    fn demo() -> Arc<MockForge> {
+        Arc::new(MockForge::demo(MockOptions::instant()))
+    }
+
+    #[tokio::test]
+    async fn a_repository_opens_on_its_pull_requests() {
+        let shots = run(&demo(), &[]).await;
+        assert!(shots[0].text.contains("Needs you"), "{}", shots[0].text);
+    }
+
+    #[tokio::test]
+    async fn the_whole_comment_flow_works_from_key_presses() {
+        let forge = demo();
+        // The first pull request in the first group: ask the app which it is.
+        let shots = run(&forge, &["x", "c", "=written by keys", "ctrl+s"]).await;
+        assert!(shots[1].text.contains("comment"), "{}", shots[1].text);
+        assert!(
+            shots[3].text.contains("written by keys"),
+            "{}",
+            shots[3].text
+        );
+        assert!(shots[4].text.contains("commented on"), "{}", shots[4].text);
+        let pulls = forge.pull_requests().unwrap();
+        let mut found = false;
+        for number in [142, 145, 146, 139, 140] {
+            let item = ItemRef::pull_request(rocket(), number);
+            if let Ok(detail) = pulls.get(&item).await {
+                found |= detail.comments.iter().any(|c| c.body == "written by keys");
+            }
+        }
+        assert!(found);
+    }
+
+    #[tokio::test]
+    async fn links_are_announced_not_opened() {
+        let shots = run(&demo(), &["o"]).await;
+        assert!(shots[1].text.contains("would open"), "{}", shots[1].text);
+    }
+
+    #[tokio::test]
+    async fn the_editor_is_refused_without_a_terminal() {
+        let forge = demo();
+        let mut forges = Forges::new();
+        forges.add(Arc::clone(&forge) as Arc<dyn Forge>);
+        let steps = ["x", "c", "ctrl+e"].map(str::to_owned);
+        let services = Services {
+            forges,
+            repo: Some(rocket()),
+            ..Services::default()
+        };
+        let result = screens(&Config::default(), services, &steps, 120, 40, QUIET).await;
+        assert!(result.unwrap_err().contains("real terminal"));
+    }
+
+    #[tokio::test]
+    async fn a_bad_key_says_so() {
+        let mut forges = Forges::new();
+        forges.add(demo() as Arc<dyn Forge>);
+        let steps = ["no-such-key".to_owned()];
+        let services = Services {
+            forges,
+            ..Services::default()
+        };
+        assert!(
+            screens(&Config::default(), services, &steps, 80, 24, QUIET)
+                .await
+                .is_err()
+        );
     }
 }

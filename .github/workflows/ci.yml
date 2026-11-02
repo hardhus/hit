@@ -2,8 +2,10 @@ name: CI
 
 on:
   push:
-    branches: [main, develop, 'phase/**']
+    branches: [develop, 'phase/**']
   pull_request:
+  # The release workflow runs these first; on main it is the only run.
+  workflow_call:
 
 permissions:
   contents: read

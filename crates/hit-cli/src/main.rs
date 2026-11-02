@@ -66,5 +66,23 @@ fn main() -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Some(Command::Completions { .. }) => Ok(ExitCode::SUCCESS),
+        Some(Command::Work(command)) => {
+            let options = commands::work::Options {
+                config_file: &config_file,
+                log_level: cli.log_level.map(Into::into),
+                demo: cli.demo,
+                repo: cli.repo.as_deref(),
+                account: cli.account.as_deref(),
+                json: cli.json,
+            };
+            match commands::work::run(command, &paths, &options) {
+                Ok(code) => Ok(code),
+                // A refusal is an answer here, not a crash report.
+                Err(e) => {
+                    eprintln!("{} {e}", style::error("error:"));
+                    Ok(ExitCode::FAILURE)
+                }
+            }
+        }
     }
 }

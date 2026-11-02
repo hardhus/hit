@@ -932,10 +932,7 @@ async fn the_forge_s_reason_for_refusing_is_kept() {
     )
     .await
     .unwrap_err();
-    assert_eq!(
-        error,
-        ForgeError::Rejected("Validation Failed: Body is too long".to_owned())
-    );
+    assert_eq!(error, ForgeError::Rejected("Body is too long".to_owned()));
 }
 
 #[tokio::test]

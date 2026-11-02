@@ -175,6 +175,18 @@ impl Key {
         Ok(Self { code, ctrl, alt })
     }
 
+    /// The key press this stands for.
+    pub fn to_event(self) -> KeyEvent {
+        let mut modifiers = KeyModifiers::NONE;
+        if self.ctrl {
+            modifiers |= KeyModifiers::CONTROL;
+        }
+        if self.alt {
+            modifiers |= KeyModifiers::ALT;
+        }
+        KeyEvent::new(self.code, modifiers)
+    }
+
     pub fn from_event(event: &KeyEvent) -> Self {
         let ctrl = event.modifiers.contains(KeyModifiers::CONTROL);
         let alt = event.modifiers.contains(KeyModifiers::ALT);

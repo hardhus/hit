@@ -21,7 +21,7 @@ pub struct Options<'a> {
 /// The repository to open on: the one asked for, otherwise the current
 /// folder's. Only hosts with a signed-in account count, so a folder on
 /// another forge just opens the overview.
-fn repo_to_open(
+pub(crate) fn repo_to_open(
     options: &Options<'_>,
     config: &Config,
     forges: &Forges,

@@ -25,7 +25,7 @@ mod view;
 pub mod views;
 
 pub use action::{Action, DataEvent, Toast};
-pub use app::{App, run};
+pub use app::{App, Screen, run, screens};
 pub use error::TuiError;
 pub use event::Event;
 pub use sync::Loaded;

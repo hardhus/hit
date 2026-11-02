@@ -5,11 +5,23 @@
 //! and on Windows opening one goes through `cmd`. So only the characters a URL
 //! is made of get through, without quotes or anything else a shell acts on.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use crate::action::Toast;
+
+/// Running without a person at the keyboard: say what would open instead.
+static REHEARSING: AtomicBool = AtomicBool::new(false);
+
+pub fn rehearse() {
+    REHEARSING.store(true, Ordering::Relaxed);
+}
 
 pub fn open(url: &str) -> Result<(), Toast> {
     if !is_safe(url) {
         return Err(Toast::error(format!("refusing to open {url:?}")));
+    }
+    if REHEARSING.load(Ordering::Relaxed) {
+        return Err(Toast::info(format!("would open {url}")));
     }
     open::that_detached(url).map_err(|e| Toast::error(format!("could not open the browser: {e}")))
 }
