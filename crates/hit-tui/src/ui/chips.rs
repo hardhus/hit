@@ -3,7 +3,7 @@
 use hit_core::{
     AccountId,
     focus::{FocusReason, FocusSubject},
-    model::{CheckState, CheckSummary, Label, PrState},
+    model::{CheckState, CheckSummary, CloseReason, Issue, IssueState, Label, PrState},
 };
 use ratatui::{
     style::{Color, Modifier, Style},
@@ -78,14 +78,32 @@ pub fn subject_icon(subject: &FocusSubject, theme: &Theme) -> Span<'static> {
             };
             Span::styled("◈", bold(color))
         }
-        FocusSubject::Issue(issue) => {
-            let color = if issue.is_open() {
-                theme.success
-            } else {
-                theme.highlight
-            };
-            Span::styled("○", bold(color))
+        FocusSubject::Issue(issue) => issue_icon(issue, theme),
+    }
+}
+
+/// `○` open, `✓` done, `⊘` closed as not planned or duplicate.
+pub fn issue_icon(issue: &Issue, theme: &Theme) -> Span<'static> {
+    match issue.state {
+        IssueState::Open => Span::styled("○", bold(theme.success)),
+        IssueState::Closed(Some(CloseReason::NotPlanned | CloseReason::Duplicate)) => {
+            Span::styled("⊘", bold(theme.muted))
         }
+        IssueState::Closed(_) => Span::styled("✓", bold(theme.highlight)),
+    }
+}
+
+/// `open`, `closed`, `not planned`, `duplicate`, colored like the icon.
+pub fn issue_state_span(issue: &Issue, theme: &Theme) -> Span<'static> {
+    match issue.state {
+        IssueState::Open => Span::styled("open", bold(theme.success)),
+        IssueState::Closed(Some(CloseReason::NotPlanned)) => {
+            Span::styled("closed · not planned", bold(theme.muted))
+        }
+        IssueState::Closed(Some(CloseReason::Duplicate)) => {
+            Span::styled("closed · duplicate", bold(theme.muted))
+        }
+        IssueState::Closed(_) => Span::styled("closed", bold(theme.highlight)),
     }
 }
 

@@ -21,7 +21,7 @@ use crate::{
     browser,
     keymap::{Command, Scope},
     layout::{LayoutStrategy, TabsLayout},
-    screens::{FocusTab, InboxTab, Placeholder, PullsTab, Tab, TabArea},
+    screens::{FocusTab, InboxTab, IssuesTab, Placeholder, PullsTab, Tab, TabArea},
     ui::{
         chips::bold,
         hints,
@@ -53,12 +53,7 @@ impl Shell {
                 Box::new(FocusTab::new()),
                 Box::new(InboxTab::new()),
                 Box::new(PullsTab::new()),
-                Box::new(Placeholder::new(
-                    "Issues",
-                    "○",
-                    "find, read and triage",
-                    "F7",
-                )),
+                Box::new(IssuesTab::new()),
                 Box::new(Placeholder::new(
                     "Repos",
                     "▣",

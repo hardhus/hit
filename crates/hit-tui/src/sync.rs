@@ -10,8 +10,8 @@ use std::{future::Future, sync::Arc, time::Duration};
 use hit_cache::{Cache, Vault};
 use hit_core::{
     Forge, ForgeError, ItemRef, Notifications, Timestamp,
-    model::{Notification, NotificationId, PullRequest, PullRequestDetail},
-    query::{NotificationQuery, PageRequest, PrQuery, Scope},
+    model::{Issue, IssueDetail, Notification, NotificationId, PullRequest, PullRequestDetail},
+    query::{IssueQuery, NotificationQuery, PageRequest, PrQuery, Scope},
 };
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::{sync::mpsc, task::JoinHandle};
@@ -347,6 +347,70 @@ pub fn spawn_pulls(
             }
         };
         load(&store, &format!("pulls:{view}"), true, fetch, &send).await;
+    })
+}
+
+/// One ready-made issue view of one account, cached per view.
+pub fn spawn_issues(
+    forge: Arc<dyn Forge>,
+    cache: Option<Arc<Cache>>,
+    view: &'static str,
+    query: IssueQuery,
+    tx: mpsc::UnboundedSender<Action>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let store = store_for(cache, forge.as_ref());
+        let account = forge.account().clone();
+        let send = |result: Result<Loaded<Vec<Issue>>, ForgeError>| {
+            let _ = tx.send(Action::Data(DataEvent::Issues {
+                account: account.clone(),
+                view,
+                result: result.map(|l| Loaded {
+                    value: Arc::new(l.value),
+                    fetched_at: l.fetched_at,
+                    fresh: l.fresh,
+                }),
+            }));
+        };
+        let fetch = || async {
+            match forge.issues() {
+                Some(issues) => issues
+                    .list(&query, &PageRequest::first(50))
+                    .await
+                    .map(|page| page.items),
+                None => Err(ForgeError::Unsupported("issues")),
+            }
+        };
+        load(&store, &format!("issues:{view}"), true, fetch, &send).await;
+    })
+}
+
+/// An issue's detail, cached so reopening is instant.
+pub fn spawn_issue(
+    forge: Arc<dyn Forge>,
+    cache: Option<Arc<Cache>>,
+    item: ItemRef,
+    tx: mpsc::UnboundedSender<Action>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let store = store_for(cache, forge.as_ref());
+        let send = |result: Result<Loaded<IssueDetail>, ForgeError>| {
+            let _ = tx.send(Action::Data(DataEvent::IssueDetail {
+                item: item.clone(),
+                result: result.map(|l| Loaded {
+                    value: Arc::new(l.value),
+                    fetched_at: l.fetched_at,
+                    fresh: l.fresh,
+                }),
+            }));
+        };
+        let fetch = || async {
+            match forge.issues() {
+                Some(issues) => issues.get(&item).await,
+                None => Err(ForgeError::Unsupported("issues")),
+            }
+        };
+        load(&store, &format!("issue:{item}"), true, fetch, &send).await;
     })
 }
 

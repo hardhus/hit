@@ -529,13 +529,18 @@ impl Tab for InboxTab {
             Command::Open => {
                 let (account, n) = self.selected(ctx)?;
                 self.on_opened(&account, &n, ctx);
-                if let Some(item) = n.subject.item.clone()
-                    && item.kind == ItemKind::PullRequest
-                {
-                    return Some(Action::ShowDetail(Detail::Pull {
-                        account,
-                        item,
-                        summary: None,
+                if let Some(item) = n.subject.item.clone() {
+                    return Some(Action::ShowDetail(match item.kind {
+                        ItemKind::PullRequest => Detail::Pull {
+                            account,
+                            item,
+                            summary: None,
+                        },
+                        ItemKind::Issue => Detail::Issue {
+                            account,
+                            item,
+                            summary: None,
+                        },
                     }));
                 }
                 return Some(Action::ShowDetail(Detail::Notification {

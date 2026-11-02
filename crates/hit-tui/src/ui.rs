@@ -4,6 +4,7 @@
 pub mod chips;
 pub mod hints;
 pub mod list;
+pub mod picker;
 pub mod popup;
 pub mod tabs;
 pub mod toast;

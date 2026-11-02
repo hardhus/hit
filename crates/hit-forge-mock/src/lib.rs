@@ -212,6 +212,12 @@ impl Issues for MockForge {
             .data()
             .issues
             .iter()
+            .filter(|d| {
+                query.mentioned.as_ref().is_none_or(|m| {
+                    let at = format!("@{m}");
+                    d.body.contains(&at) || d.comments.iter().any(|c| c.body.contains(&at))
+                })
+            })
             .map(|d| &d.issue)
             .filter(|issue| query.scope.includes(&issue.reference.repo))
             .filter(|issue| match query.state {

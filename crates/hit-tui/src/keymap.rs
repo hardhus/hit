@@ -87,6 +87,7 @@ commands! {
     ToggleUnread => "toggle_unread", List,   "Unread only / all notifications",  ["u"];
     Participating=> "participating", List,   "Only notifications for you",       ["p"];
     CycleReason  => "cycle_reason",  List,   "Filter by reason / switch view",   ["f"];
+    Labels       => "labels",        List,   "Filter by label",                  ["#"];
     NextFile     => "next_file",     List,   "Next file in a diff",              ["]"];
     PrevFile     => "prev_file",     List,   "Previous file in a diff",          ["["];
     NextHunk     => "next_hunk",     List,   "Next change in a diff",            ["}"];

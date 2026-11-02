@@ -289,6 +289,7 @@ impl Issues for GithubForge {
         };
         let author = qualifier("author", query.author.as_deref())?;
         let assignee = qualifier("assignee", query.assignee.as_deref())?;
+        let mentioned = qualifier("mentions", query.mentioned.as_deref())?;
         let text = query.search.as_deref().map(search_text).unwrap_or_default();
         let q = join(&[
             "is:issue",
@@ -297,6 +298,7 @@ impl Issues for GithubForge {
             &scope_qualifier(&query.scope, self.me())?,
             &author,
             &assignee,
+            &mentioned,
             sort_qualifier(query.sort),
             &text,
         ]);

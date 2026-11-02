@@ -6,7 +6,7 @@ use std::{sync::Arc, time::Duration};
 use hit_core::{
     AccountId, ForgeError, ItemRef,
     diff::{FileStatus, LineKind},
-    model::{CheckState, PullRequest, PullRequestDetail, ReviewState},
+    model::{CheckState, PullRequest, PullRequestDetail},
 };
 use ratatui::{
     Frame,
@@ -24,15 +24,15 @@ use crate::{
     browser,
     highlight::HighlightedDiff,
     keymap::{Command, Scope},
-    markdown,
     screens::{pr_fields, pr_icon},
     sync::{self, Loaded},
     ui::{
         chips::{self, bold},
         tabs::{TabBar, TabSpec},
-        wrapped_height,
     },
 };
+
+use super::thread;
 
 const GLIDE: Duration = Duration::from_millis(200);
 const FADE: Duration = Duration::from_millis(120);
@@ -214,133 +214,22 @@ impl PullView {
         ]
     }
 
-    fn conversation_lines(&self, ctx: &Ctx) -> Vec<Line<'static>> {
-        let t = &ctx.theme;
-        let muted = Style::new().fg(t.muted);
-        let Some(detail) = &self.detail else {
-            return match &self.detail_error {
-                Some(e) => vec![Line::styled(
-                    format!("couldn't load: {e}"),
-                    Style::new().fg(t.danger),
-                )],
-                None => vec![Line::from(vec![
-                    Span::styled(crate::screens::spinner(ctx), bold(t.accent)),
-                    Span::styled(" loading the conversation…", muted),
-                ])],
-            };
-        };
-        let detail = &detail.value;
-        let mut lines = Vec::new();
-        let body = markdown::render(&detail.body, t);
-        if body.is_empty() {
-            lines.push(Line::styled("No description provided.", muted));
-        } else {
-            lines.extend(body);
-        }
-        lines.push(Line::raw(""));
-
-        // Comments and reviews, oldest first.
-        enum Event<'a> {
-            Comment(&'a hit_core::model::Comment),
-            Review(&'a hit_core::model::Review),
-        }
-        let mut events: Vec<(hit_core::Timestamp, Event)> = detail
-            .comments
-            .iter()
-            .map(|c| (c.created_at, Event::Comment(c)))
-            .chain(
-                detail
-                    .reviews
-                    .iter()
-                    .filter_map(|r| r.submitted_at.map(|at| (at, Event::Review(r)))),
-            )
-            .collect();
-        events.sort_by_key(|(at, _)| *at);
-
-        if events.is_empty() {
-            lines.push(Line::styled("No comments yet.", muted));
-        }
-        for (at, event) in events {
-            let (author, verb, color, body) = match event {
-                Event::Comment(c) => (&c.author.login, "commented", t.accent, c.body.as_str()),
-                Event::Review(r) => {
-                    let (verb, color) = match r.state {
-                        ReviewState::Approved => ("approved", t.success),
-                        ReviewState::ChangesRequested => ("requested changes", t.warning),
-                        ReviewState::Commented => ("reviewed", t.info),
-                        ReviewState::Dismissed => ("review dismissed", t.muted),
-                        ReviewState::Pending => ("pending review", t.muted),
-                    };
-                    (&r.author.login, verb, color, r.body.as_str())
-                }
-            };
-            lines.push(Line::from(vec![
-                Span::styled("● ", bold(color)),
-                Span::styled(format!("@{author}"), bold(t.fg)),
-                Span::styled(format!(" {verb}"), bold(color)),
-                Span::styled(format!(" · {}", sync::ago(at)), muted),
-            ]));
-            for line in markdown::render(body, t) {
-                let mut spans = vec![Span::styled("│ ", Style::new().fg(t.border))];
-                spans.extend(line.spans);
-                lines.push(Line::from(spans));
-            }
-            lines.push(Line::raw(""));
-        }
-        lines
-    }
-
     fn render_conversation(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) {
-        let mut lines = self.conversation_lines(ctx);
-        if area.width >= 120
-            && let Some(pr) = self.pr()
-        {
-            // Wide: the PR's fields to the right of the conversation.
-            let [main, side] =
-                Layout::horizontal([Constraint::Fill(1), Constraint::Length(44)]).areas(area);
-            let mut side_lines = pr_fields(pr, ctx);
-            side_lines.insert(
-                0,
-                Line::from(Span::styled("Details", bold(ctx.theme.accent_alt))),
-            );
-            frame.render_widget(
-                Paragraph::new(side_lines).wrap(Wrap { trim: true }).block(
-                    Block::new()
-                        .borders(ratatui::widgets::Borders::LEFT)
-                        .border_style(Style::new().fg(ctx.theme.border))
-                        .padding(ratatui::widgets::Padding::left(1)),
-                ),
-                side,
-            );
-            self.render_scrolled(frame, main, &mut lines, ctx, true);
-        } else {
-            self.render_scrolled(frame, area, &mut lines, ctx, true);
-        }
-    }
-
-    fn render_scrolled(
-        &mut self,
-        frame: &mut Frame,
-        area: Rect,
-        lines: &mut Vec<Line<'static>>,
-        ctx: &Ctx,
-        wrap: bool,
-    ) {
-        let area = Rect {
-            width: area.width.saturating_sub(1),
-            ..area
+        let lines = match &self.detail {
+            Some(d) => thread::lines(&d.value.body, &d.value.comments, &d.value.reviews, ctx),
+            None => thread::placeholder(self.detail_error.as_ref(), ctx),
         };
-        let max = wrapped_height(lines, area.width).saturating_sub(area.height);
-        self.conversation_scroll = self.conversation_scroll.min(max);
-        let mut paragraph =
-            Paragraph::new(std::mem::take(lines)).scroll((self.conversation_scroll, 0));
-        if wrap {
-            paragraph = paragraph.wrap(Wrap { trim: false });
-        }
-        if self.switched.within(FADE) && ctx.animations {
-            paragraph = paragraph.style(Style::new().add_modifier(Modifier::DIM));
-        }
-        frame.render_widget(paragraph, area);
+        let side = self.pr().map(|pr| pr_fields(pr, ctx));
+        let dim = self.switched.within(FADE) && ctx.animations;
+        thread::render(
+            frame,
+            area,
+            lines,
+            side,
+            &mut self.conversation_scroll,
+            dim,
+            ctx,
+        );
     }
 
     fn file_icon(status: FileStatus, ctx: &Ctx) -> Span<'static> {

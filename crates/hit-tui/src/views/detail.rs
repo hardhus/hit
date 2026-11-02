@@ -1,11 +1,7 @@
-//! A full-screen look at one item. Richer detail (body, comments, diff)
-//! arrives with the PR and Issue screens (F6/F7).
+//! A notification without a pull request or issue behind it (a release,
+//! a discussion, a security alert…): what GitHub says about it.
 
-use hit_core::{
-    AccountId,
-    focus::{FocusItem, FocusSubject},
-    model::Notification,
-};
+use hit_core::{AccountId, model::Notification};
 use ratatui::{
     Frame,
     layout::Rect,
@@ -19,65 +15,40 @@ use crate::{
     anim::Moment,
     browser,
     keymap::{Command, Scope},
-    screens::{notification_lines, preview_lines},
+    screens::notification_lines,
     ui::{popup::Popup, wrapped_height},
 };
 
-enum Content {
-    Focus(FocusItem),
-    Notification(Notification),
-}
-
 pub struct DetailView {
     account: AccountId,
-    content: Content,
+    notification: Notification,
     scroll: u16,
     opened: Moment,
 }
 
 impl DetailView {
-    fn new(account: AccountId, content: Content) -> Self {
+    pub fn notification(account: AccountId, notification: Notification) -> Self {
         Self {
             account,
-            content,
+            notification,
             scroll: 0,
             opened: Moment::now(),
         }
     }
 
-    pub fn focus(account: AccountId, item: FocusItem) -> Self {
-        Self::new(account, Content::Focus(item))
-    }
-
-    pub fn notification(account: AccountId, notification: Notification) -> Self {
-        Self::new(account, Content::Notification(notification))
-    }
-
     fn url(&self) -> String {
-        match &self.content {
-            Content::Focus(item) => match &item.subject {
-                FocusSubject::PullRequest(pr) => pr.url.clone(),
-                FocusSubject::Issue(issue) => issue.url.clone(),
-            },
-            Content::Notification(n) => n.subject.url.clone().unwrap_or_default(),
-        }
+        self.notification.subject.url.clone().unwrap_or_default()
     }
 
     fn title(&self) -> String {
-        match &self.content {
-            Content::Focus(item) => item.subject.reference().to_string(),
-            Content::Notification(n) => match &n.subject.item {
-                Some(item) => item.to_string(),
-                None => n.repo.to_string(),
-            },
+        match &self.notification.subject.item {
+            Some(item) => item.to_string(),
+            None => self.notification.repo.to_string(),
         }
     }
 
     fn lines(&self, ctx: &Ctx) -> Vec<Line<'static>> {
-        match &self.content {
-            Content::Focus(item) => preview_lines(&self.account, item, ctx),
-            Content::Notification(n) => notification_lines(&self.account, n, ctx),
-        }
+        notification_lines(&self.account, &self.notification, ctx)
     }
 }
 
