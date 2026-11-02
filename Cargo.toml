@@ -12,13 +12,13 @@ authors = ["hardhus"]
 
 [workspace.dependencies]
 # internal
-hit-auth = { path = "crates/hit-auth" }
-hit-cache = { path = "crates/hit-cache" }
-hit-config = { path = "crates/hit-config" }
-hit-core = { path = "crates/hit-core" }
-hit-forge-mock = { path = "crates/hit-forge-mock" }
-hit-github = { path = "crates/hit-github" }
-hit-tui = { path = "crates/hit-tui" }
+hit-auth = { path = "crates/hit-auth", version = "0.1.0" }
+hit-cache = { path = "crates/hit-cache", version = "0.1.0" }
+hit-config = { path = "crates/hit-config", version = "0.1.0" }
+hit-core = { path = "crates/hit-core", version = "0.1.0" }
+hit-forge-mock = { path = "crates/hit-forge-mock", version = "0.1.0" }
+hit-github = { path = "crates/hit-github", version = "0.1.0" }
+hit-tui = { path = "crates/hit-tui", version = "0.1.0" }
 
 # async
 async-trait = "0.1"

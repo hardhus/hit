@@ -46,11 +46,13 @@ changes last until you quit.
 [Releases](https://github.com/hardhus/hit/releases), unpack it and put `hit`
 somewhere on your `PATH`. Each release lists SHA-256 checksums.
 
-**From source** (Rust 1.90 or newer):
+**With Cargo** (Rust 1.90 or newer):
 
 ```sh
-cargo install --git https://github.com/hardhus/hit --locked hit-cli
+cargo install hit-cli --locked
 ```
+
+The command it installs is `hit`.
 
 On Linux, tokens are kept in the Secret Service (GNOME Keyring, KWallet and so
 on). If you have none, see `--insecure-storage` below.
