@@ -289,6 +289,7 @@ fn render(frame: &mut Frame, views: &mut [Box<dyn View>], ctx: &Ctx) {
     if let Some(view) = views.last_mut() {
         view.render(frame, area, ctx);
     }
+    crate::ui::scrub(frame.buffer_mut());
 }
 
 /// Ctrl+C always quits, even if a view (e.g. a text input) would take the key.

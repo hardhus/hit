@@ -219,7 +219,7 @@ pub fn pr_status_spans(pr: &PullRequest, ctx: &Ctx) -> Vec<Span<'static>> {
     }
     if pr.comments > 0 {
         spans.push(sep());
-        spans.push(Span::styled(format!("{} comments", pr.comments), muted));
+        spans.push(Span::styled(chips::comments(pr.comments), muted));
     }
     spans.push(sep());
     spans.push(Span::styled(sync::ago(pr.updated_at), muted));

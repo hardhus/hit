@@ -28,6 +28,7 @@ use crate::{
         popup::Popup,
         tabs::{TabBar, TabSpec},
         toast::Toasts,
+        wrapped_height,
     },
 };
 use palette::{Entry, Outcome, Palette};
@@ -45,6 +46,7 @@ pub struct Shell {
     layout: Box<dyn LayoutStrategy>,
     palette: Option<Palette>,
     help: Option<Moment>,
+    help_scroll: u16,
     toasts: Toasts,
     warnings: Vec<String>,
     /// Where `.` goes back to after showing all repositories.
@@ -70,6 +72,7 @@ impl Shell {
             layout: Box::new(TabsLayout::default()),
             palette: None,
             help: None,
+            help_scroll: 0,
             toasts: Toasts::default(),
             warnings,
             last_repo: None,
@@ -111,6 +114,7 @@ impl Shell {
             Command::Quit => return Some(Action::Quit),
             Command::Help => {
                 self.help = Some(Moment::now());
+                self.help_scroll = 0;
             }
             Command::Palette => {
                 self.palette = Some(Palette::new());
@@ -284,6 +288,15 @@ impl Shell {
         );
     }
 
+    fn repo_badge(ctx: &Ctx) -> Line<'static> {
+        ctx.scope.repo().map_or_else(Line::default, |repo| {
+            Line::from(Span::styled(
+                format!("⌂ {repo} "),
+                bold(chips::repo_color(repo, &ctx.theme)),
+            ))
+        })
+    }
+
     fn accounts_line(ctx: &Ctx) -> Line<'static> {
         let t = &ctx.theme;
         let mut spans = Vec::new();
@@ -323,29 +336,31 @@ impl Shell {
     fn help_section(scope: Scope, ctx: &Ctx) -> Vec<Line<'static>> {
         let t = &ctx.theme;
         let mut lines = vec![Line::from(Span::styled(scope.title(), bold(t.accent_alt)))];
-        for &command in Command::ALL.iter().filter(|c| c.scope() == scope) {
+        let bound = Command::ALL
+            .iter()
+            .filter(|c| c.scope() == scope && !ctx.keymap.keys(**c).is_empty());
+        for &command in bound {
             lines.push(Line::from(vec![
                 Span::styled(
                     format!("  {:<14}", ctx.keymap.label(command)),
                     bold(t.accent),
                 ),
                 Span::styled(command.description(), Style::new().fg(t.fg)),
-                Span::styled(format!("  {}", command.name()), Style::new().fg(t.muted)),
             ]));
         }
         lines
     }
 
-    fn render_help(&self, frame: &mut Frame, area: Rect, opened: Moment, ctx: &Ctx) {
+    fn render_help(&mut self, frame: &mut Frame, area: Rect, opened: Moment, ctx: &Ctx) {
         let t = &ctx.theme;
         let mut left = Self::help_section(Scope::Global, ctx);
         left.push(Line::raw(""));
         left.push(Line::styled(
-            "Rebind with the dim names under [keys] in config.toml,",
+            "Rebind under [keys] in config.toml;",
             Style::new().fg(t.muted),
         ));
         left.push(Line::styled(
-            "e.g. down = [\"j\", \"n\"]",
+            "press , to see each command's name there.",
             Style::new().fg(t.muted),
         ));
         if !self.warnings.is_empty() {
@@ -367,9 +382,14 @@ impl Shell {
         } else {
             (60, (left.len() + right.len() + 1) as u16 + 2)
         };
+        let overflows = height > area.height.saturating_sub(2);
         let inner = Popup {
             title: "keys",
-            footer: Some("esc close"),
+            footer: Some(if overflows {
+                "j/k scroll · esc close"
+            } else {
+                "esc close"
+            }),
             width,
             height,
             border: t.accent,
@@ -388,13 +408,33 @@ impl Shell {
                 ratatui::layout::Constraint::Percentage(50),
             ])
             .areas(inner);
-            frame.render_widget(Paragraph::new(left).wrap(Wrap { trim: true }), l);
-            frame.render_widget(Paragraph::new(right), r);
+            let content = wrapped_height(&left, l.width).max(wrapped_height(&right, r.width));
+            self.help_scroll = self.help_scroll.min(content.saturating_sub(inner.height));
+            let scroll = (self.help_scroll, 0);
+            frame.render_widget(
+                Paragraph::new(left)
+                    .wrap(Wrap { trim: false })
+                    .scroll(scroll),
+                l,
+            );
+            frame.render_widget(
+                Paragraph::new(right)
+                    .wrap(Wrap { trim: false })
+                    .scroll(scroll),
+                r,
+            );
         } else {
             let mut lines = left;
             lines.push(Line::raw(""));
             lines.extend(right);
-            frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
+            let content = wrapped_height(&lines, inner.width);
+            self.help_scroll = self.help_scroll.min(content.saturating_sub(inner.height));
+            frame.render_widget(
+                Paragraph::new(lines)
+                    .wrap(Wrap { trim: false })
+                    .scroll((self.help_scroll, 0)),
+                inner,
+            );
         }
     }
 }
@@ -440,12 +480,16 @@ impl View for Shell {
         }
 
         if self.help.is_some() {
-            let close = matches!(
-                ctx.keymap.lookup(key, &[Scope::Global, Scope::List]),
-                Some(Command::Help | Command::Back | Command::Quit)
-            );
-            if close {
-                self.help = None;
+            match ctx.keymap.lookup(key, &[Scope::Global, Scope::List]) {
+                Some(Command::Help | Command::Back | Command::Quit) => self.help = None,
+                Some(Command::Down) => self.help_scroll = self.help_scroll.saturating_add(1),
+                Some(Command::Up) => self.help_scroll = self.help_scroll.saturating_sub(1),
+                Some(Command::PageDown) => self.help_scroll = self.help_scroll.saturating_add(10),
+                Some(Command::PageUp) => self.help_scroll = self.help_scroll.saturating_sub(10),
+                Some(Command::Top) => self.help_scroll = 0,
+                // Stops at the end when drawn.
+                Some(Command::Bottom) => self.help_scroll = u16::MAX,
+                _ => {}
             }
             return Some(Action::Redraw);
         }
@@ -552,7 +596,8 @@ impl View for Shell {
             } else {
                 0.0
             },
-            right: Self::accounts_line(ctx),
+            // On a narrow screen the repository matters more than who you are.
+            right: vec![Self::accounts_line(ctx), Self::repo_badge(ctx)],
         }
         .render(frame, regions.tabs);
         // First frame (or a layout change): put the underline in place.
@@ -593,10 +638,15 @@ impl View for Shell {
         ));
         items.push((&[Command::NextTab], "tabs"));
         items.push((&[Command::Palette], "palette"));
-        items.push((&[Command::Help], "help"));
         items.push((&[Command::Settings], "settings"));
+        items.push((&[Command::Help], "help"));
         frame.render_widget(
-            Paragraph::new(hints::line(&items, &ctx.keymap, t)),
+            Paragraph::new(hints::line(
+                &items,
+                &ctx.keymap,
+                t,
+                regions.hints.width.saturating_sub(1),
+            )),
             Rect {
                 x: regions.hints.x + 1,
                 width: regions.hints.width.saturating_sub(1),
@@ -911,6 +961,63 @@ mod tests {
             shell.handle_event(&key(KeyCode::Esc), &ctx),
             Some(Action::Redraw)
         ));
+    }
+
+    fn screen_at(shell: &mut Shell, ctx: &Ctx, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| shell.render(frame, frame.area(), ctx))
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .chunks(usize::from(width))
+            .map(|row| row.iter().map(|c| c.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[tokio::test]
+    async fn every_key_can_be_read_on_a_small_terminal() {
+        let (ctx, _rx) = demo_ctx();
+        let mut shell = Shell::new(Vec::new());
+        shell.handle_event(&key(KeyCode::Char('?')), &ctx);
+        let top = screen_at(&mut shell, &ctx, 80, 24);
+        assert!(top.contains("Quit hit"), "{top}");
+        assert!(top.contains("j/k scroll"), "{top}");
+        assert!(!top.contains("Scroll a diff right"), "{top}");
+
+        shell.handle_event(&key(KeyCode::Char('G')), &ctx);
+        let bottom = screen_at(&mut shell, &ctx, 80, 24);
+        assert!(bottom.contains("Scroll a diff right"), "{bottom}");
+
+        // A key press past the end still scrolls back at once.
+        let end = shell.help_scroll;
+        shell.handle_event(&key(KeyCode::Char('j')), &ctx);
+        let _ = screen_at(&mut shell, &ctx, 80, 24);
+        assert_eq!(shell.help_scroll, end);
+        shell.handle_event(&key(KeyCode::Char('k')), &ctx);
+        assert_eq!(shell.help_scroll, end - 1);
+    }
+
+    #[tokio::test]
+    async fn help_is_always_on_the_hint_line_and_tabs_stay_readable() {
+        let (ctx, _rx) = demo_ctx();
+        let mut shell = Shell::new(Vec::new());
+        for (width, height) in [(80, 24), (60, 20)] {
+            let text = screen_at(&mut shell, &ctx, width, height);
+            let hints = text.lines().last().unwrap();
+            assert!(hints.contains("?  help"), "{hints}");
+        }
+        for width in [20, 40, 60, 72, 80, 100] {
+            let text = screen_at(&mut shell, &ctx, width, 20);
+            let tabs = text.lines().next().unwrap();
+            if width >= 80 {
+                assert!(tabs.contains("5 Repos"), "{tabs}");
+            }
+            assert!(!tabs.contains("Repo@"), "{tabs}");
+        }
     }
 
     #[tokio::test]

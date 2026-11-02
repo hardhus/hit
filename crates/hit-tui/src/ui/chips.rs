@@ -32,6 +32,15 @@ pub fn problem(error: &ForgeError) -> String {
     }
 }
 
+/// `1 comment`, `3 comments`.
+pub fn comments(count: u32) -> String {
+    if count == 1 {
+        "1 comment".to_owned()
+    } else {
+        format!("{count} comments")
+    }
+}
+
 pub fn bold(color: Color) -> Style {
     Style::new().fg(color).add_modifier(Modifier::BOLD)
 }

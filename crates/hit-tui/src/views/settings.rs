@@ -670,7 +670,12 @@ impl View for SettingsView {
             (&[Command::Back], "close"),
         ];
         frame.render_widget(
-            Paragraph::new(hints::line(&items, &ctx.keymap, t)),
+            Paragraph::new(hints::line(
+                &items,
+                &ctx.keymap,
+                t,
+                hint.width.saturating_sub(1),
+            )),
             Rect {
                 x: hint.x + 1,
                 width: hint.width.saturating_sub(1),

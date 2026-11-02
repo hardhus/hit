@@ -272,8 +272,11 @@ impl InboxTab {
             Some(item) => top.extend(chips::item_ref(item, ctx)),
             None => {
                 top.push(Span::raw(" "));
-                top.extend(chips::repo_span(&n.repo, ctx));
-                top.push(Span::raw(" "));
+                // Inside its own repository the name would only repeat it.
+                if let Some(repo) = chips::repo_span(&n.repo, ctx) {
+                    top.push(repo);
+                    top.push(Span::raw(" "));
+                }
             }
         }
         top.push(Span::styled(n.subject.title.clone(), bold(t.fg)));

@@ -77,10 +77,10 @@ impl IssueView {
             chips::issue_state_span(issue, t),
             Span::styled(
                 format!(
-                    "  · @{} opened {} · {} comments",
+                    "  · @{} opened {} · {}",
                     issue.author.login,
                     sync::ago(issue.created_at),
-                    issue.comments
+                    chips::comments(issue.comments)
                 ),
                 muted,
             ),
@@ -103,7 +103,7 @@ impl IssueView {
         ]
     }
 
-    fn hints(&self, ctx: &Ctx) -> Line<'static> {
+    fn hints(&self, width: u16, ctx: &Ctx) -> Line<'static> {
         crate::ui::hints::line(
             &[
                 (&[Command::Down, Command::Up], "scroll"),
@@ -113,6 +113,7 @@ impl IssueView {
             ],
             &ctx.keymap,
             &ctx.theme,
+            width,
         )
     }
 }
@@ -236,7 +237,7 @@ impl View for IssueView {
         let side = self.issue().map(|i| issue_fields(i, ctx));
         let dim = ctx.animations && self.opened.within(FADE);
         thread::render(frame, body, lines, side, &mut self.scroll, dim, ctx);
-        frame.render_widget(Paragraph::new(self.hints(ctx)), hints);
+        frame.render_widget(Paragraph::new(self.hints(hints.width, ctx)), hints);
     }
 
     fn is_animating(&self) -> bool {

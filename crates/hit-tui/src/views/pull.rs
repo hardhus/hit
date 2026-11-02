@@ -682,7 +682,7 @@ impl PullView {
         frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), area);
     }
 
-    fn hints(&self, ctx: &Ctx) -> Line<'static> {
+    fn hints(&self, width: u16, ctx: &Ctx) -> Line<'static> {
         let mut items: Vec<(&[Command], &'static str)> = vec![(&[Command::NextTab], "tabs")];
         match self.pane() {
             Pane::Conversation => items.push((&[Command::Down, Command::Up], "scroll")),
@@ -698,7 +698,7 @@ impl PullView {
         items.push((&[Command::Browser], "browser"));
         items.push((&[Command::Refresh], "refresh"));
         items.push((&[Command::Back], "back"));
-        crate::ui::hints::line(&items, &ctx.keymap, &ctx.theme)
+        crate::ui::hints::line(&items, &ctx.keymap, &ctx.theme, width)
     }
 
     fn scroll(&mut self, delta: i32) {
@@ -955,7 +955,7 @@ impl View for PullView {
             } else {
                 0.0
             },
-            right: Line::raw(""),
+            right: vec![Line::raw("")],
         }
         .render(frame, tabs);
         if let Some(&(x, w)) = positions.get(self.pane)
@@ -978,7 +978,7 @@ impl View for PullView {
             Pane::Files => self.render_files(frame, body, ctx),
             Pane::Checks => self.render_checks(frame, body, ctx),
         }
-        frame.render_widget(Paragraph::new(self.hints(ctx)), hints);
+        frame.render_widget(Paragraph::new(self.hints(hints.width, ctx)), hints);
     }
 
     fn is_animating(&self) -> bool {
@@ -1053,6 +1053,85 @@ mod tests {
         assert!(text.contains("src/done.rs · resolved"), "{text}");
         assert!(!text.contains("hidden while resolved"), "{text}");
         assert!(text.contains("12 earlier comments"), "{text}");
+    }
+
+    const HOSTILE: &str =
+        "safe\x1b[31m red\x1b]0;title\x07\r\n\u{202e}gnp.exe 日本語の長いタイトル 🎉👩‍👩‍👧 end";
+
+    fn cells(buffer: &ratatui::buffer::Buffer) -> String {
+        buffer.content.iter().map(|c| c.symbol()).collect()
+    }
+
+    #[test]
+    fn text_from_the_forge_cannot_reach_the_terminal_as_commands() {
+        use crate::ui::{
+            list::{ItemList, ListState, Row},
+            scrub,
+        };
+
+        let (ctx, _rx) = Ctx::for_tests(Services::default());
+        let comment = Comment {
+            id: "1".to_owned(),
+            author: User::new("mira"),
+            body: HOSTILE.to_owned(),
+            created_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
+        };
+        let threads = [ReviewThread {
+            path: HOSTILE.to_owned(),
+            line: Some(1),
+            resolved: false,
+            outdated: false,
+            comments: vec![comment.clone()],
+        }];
+        let rows = vec![Row::item(
+            Line::raw(HOSTILE),
+            Line::raw(HOSTILE),
+            ctx.theme.accent,
+        )];
+        for width in [1, 2, 5, 13, 40, 120] {
+            let mut terminal = Terminal::new(TestBackend::new(width, 12)).unwrap();
+            terminal
+                .draw(|frame| {
+                    let area = frame.area();
+                    let lines = thread::lines(
+                        HOSTILE,
+                        std::slice::from_ref(&comment),
+                        0,
+                        &[],
+                        &threads,
+                        &ctx,
+                    );
+                    frame.render_widget(
+                        Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: false }),
+                        area,
+                    );
+                    ItemList {
+                        rows: &rows,
+                        theme: &ctx.theme,
+                        appeared: None,
+                        cursor: None,
+                    }
+                    .render(frame, area, &mut ListState::default());
+                    scrub(frame.buffer_mut());
+                })
+                .unwrap();
+            let text = cells(terminal.backend().buffer());
+            assert!(
+                !text.chars().any(|c| c.is_control() || c == '\u{202e}'),
+                "width {width}: {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn scrub_blanks_what_got_through() {
+        let mut buffer = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 3, 1));
+        buffer.content[0].set_symbol("\u{1b}");
+        buffer.content[1].set_symbol("\u{202e}");
+        buffer.content[2].set_symbol("a");
+        crate::ui::scrub(&mut buffer);
+        assert_eq!(cells(&buffer), "  a");
     }
 
     #[test]
