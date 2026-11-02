@@ -52,6 +52,8 @@ pub struct ReposTab {
     cursor: Option<Tween>,
     appeared: Option<Moment>,
     list_height: u16,
+    /// Counting open items is slow; nothing is asked before the tab is opened.
+    started: bool,
 }
 
 impl Drop for ReposTab {
@@ -253,6 +255,9 @@ impl Tab for ReposTab {
     }
 
     fn mount(&mut self, ctx: &Ctx) {
+        if !self.started {
+            return;
+        }
         self.stop();
         for forge in ctx.forges.iter() {
             self.accounts.entry(forge.account().clone()).or_default();
@@ -265,6 +270,13 @@ impl Tab for ReposTab {
         }
         if self.appeared.is_none() {
             self.appeared = Some(Moment::now());
+        }
+    }
+
+    fn activated(&mut self, ctx: &Ctx) {
+        if !self.started {
+            self.started = true;
+            self.mount(ctx);
         }
     }
 
@@ -505,7 +517,7 @@ mod tests {
             ..Services::default()
         });
         let mut tab = ReposTab::new();
-        tab.mount(&ctx);
+        tab.activated(&ctx);
         while tab.visible(&ctx).is_empty() {
             let action = rx.recv().await.unwrap();
             tab.update(&action, &ctx);

@@ -561,6 +561,17 @@ impl Tab for PullsTab {
         }
     }
 
+    fn activated(&mut self, ctx: &Ctx) {
+        let oldest = self
+            .shown_data(ctx)
+            .filter_map(|(_, data)| data.items.as_ref())
+            .map(|loaded| loaded.fetched_at)
+            .min();
+        if oldest.is_some_and(|at| sync::is_stale(at, ctx.prefs.refresh.focus_minutes)) {
+            self.mount(ctx);
+        }
+    }
+
     fn scope_changed(&mut self, ctx: &Ctx) {
         self.data.clear();
         self.view = 0;
@@ -1011,6 +1022,37 @@ mod tests {
             }
         }
         assert!(!tab.data[&(account, view)].loading_more);
+    }
+
+    #[tokio::test]
+    async fn coming_back_to_old_data_refreshes_it_and_fresh_data_stays() {
+        let forge = Arc::new(MockForge::demo(MockOptions::instant()));
+        let mut forges = Forges::new();
+        forges.add(Arc::clone(&forge) as Arc<dyn hit_core::Forge>);
+        let (ctx, mut rx) = Ctx::for_tests(Services {
+            forges,
+            ..Services::default()
+        });
+        let mut tab = PullsTab::new();
+        tab.mount(&ctx);
+        while tab.visible(&ctx).is_empty() {
+            let action = rx.recv().await.unwrap();
+            tab.update(&action, &ctx);
+        }
+        assert_eq!(forge.calls().pulls, 1);
+
+        tab.activated(&ctx);
+        tokio::task::yield_now().await;
+        assert_eq!(forge.calls().pulls, 1, "just loaded: no need");
+
+        for data in tab.data.values_mut() {
+            if let Some(loaded) = &mut data.items {
+                loaded.fetched_at = hit_core::Timestamp::UNIX_EPOCH;
+            }
+        }
+        tab.activated(&ctx);
+        rx.recv().await.unwrap();
+        assert_eq!(forge.calls().pulls, 2);
     }
 
     #[tokio::test]

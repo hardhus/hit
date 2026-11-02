@@ -66,11 +66,8 @@ impl<T> Listing<T> {
 
 /// Fallback when the forge does not say how often to poll.
 const DEFAULT_POLL: Duration = Duration::from_secs(60);
-/// Upper bound on notification pages fetched just to count unread ones.
-const MAX_UNREAD_PAGES: usize = 10;
 
 const FOCUS_KEY: &str = "focus:all";
-const UNREAD_KEY: &str = "unread:all";
 
 /// A cache key that keeps a repository's data apart from everything else.
 fn scoped_key(base: &str, scope: &Scope) -> String {
@@ -234,72 +231,6 @@ pub fn spawn_focus(
     })
 }
 
-/// Unread notifications, at the forge's poll interval (once if `poll` is off).
-pub fn spawn_unread(
-    forge: Arc<dyn Forge>,
-    cache: Option<Arc<Cache>>,
-    scope: Scope,
-    poll: bool,
-    tx: mpsc::UnboundedSender<Action>,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        let Some(_) = forge.notifications() else {
-            return;
-        };
-        let store = store_for(cache, forge.as_ref());
-        let account = forge.account().clone();
-        let key = scoped_key(UNREAD_KEY, &scope);
-        let send = |result| {
-            let _ = tx.send(Action::Data(DataEvent::UnreadCount {
-                account: account.clone(),
-                scope: scope.clone(),
-                result,
-            }));
-        };
-        let mut first = true;
-        loop {
-            let fetch = || async {
-                match forge.notifications() {
-                    Some(notifications) => count_unread(notifications, &scope).await,
-                    None => Ok(0),
-                }
-            };
-            load(&store, &key, first, fetch, &send).await;
-            first = false;
-            if !poll {
-                break;
-            }
-            let interval = forge
-                .notifications()
-                .and_then(Notifications::poll_interval)
-                .unwrap_or(DEFAULT_POLL);
-            tokio::time::sleep(interval).await;
-        }
-    })
-}
-
-async fn count_unread(
-    notifications: &dyn Notifications,
-    scope: &Scope,
-) -> Result<usize, ForgeError> {
-    let query = NotificationQuery {
-        scope: scope.clone(),
-        unread_only: true,
-        ..NotificationQuery::default()
-    };
-    let mut page = PageRequest::first(50);
-    let mut total = 0;
-    for _ in 0..MAX_UNREAD_PAGES {
-        let result = notifications.list(&query, &page).await?;
-        total += result.items.len();
-        match result.next {
-            Some(cursor) => page = PageRequest::after(cursor, 50),
-            None => break,
-        }
-    }
-    Ok(total)
-}
-
 /// Pages fetched for the inbox (newest first, 50 per page).
 const INBOX_PAGES: usize = 4;
 /// The inbox shows this many, and says so when it is full.
@@ -415,6 +346,12 @@ pub fn spawn_mark_read(
             result,
         }));
     });
+}
+
+/// Whether something fetched at `at` is due again, `minutes` being how often
+/// the user wants that; 0 means only when asked.
+pub fn is_stale(at: Timestamp, minutes: u32) -> bool {
+    minutes > 0 && Timestamp::now().duration_since(at).as_secs() >= i64::from(minutes) * 60
 }
 
 /// Pull requests and issues per page.
@@ -851,10 +788,11 @@ mod tests {
     async fn failures_keep_the_cached_value_visible() {
         let cache = Arc::new(Cache::in_memory().unwrap());
         let (tx, mut rx) = mpsc::unbounded_channel();
-        spawn_unread(
+        spawn_inbox(
             demo(),
             Some(Arc::clone(&cache)),
             Scope::All,
+            true,
             false,
             tx.clone(),
         )
@@ -866,14 +804,14 @@ mod tests {
             failure_rate: 1.0,
             ..MockOptions::instant()
         }));
-        spawn_unread(failing, Some(cache), Scope::All, false, tx)
+        spawn_inbox(failing, Some(cache), Scope::All, true, false, tx)
             .await
             .unwrap();
         let events = focus_events(&mut rx, 2).await;
-        assert!(matches!(&events[0], DataEvent::UnreadCount { result: Ok(l), .. } if !l.fresh));
+        assert!(matches!(&events[0], DataEvent::Notifications { result: Ok(l), .. } if !l.fresh));
         assert!(matches!(
             &events[1],
-            DataEvent::UnreadCount { result: Err(_), .. }
+            DataEvent::Notifications { result: Err(_), .. }
         ));
     }
 
@@ -1030,6 +968,18 @@ mod tests {
         let before = list.len();
         list.extend(page.clone(), |pr| &pr.reference);
         assert_eq!(list.len(), before);
+    }
+
+    #[test]
+    fn staleness_follows_the_setting() {
+        let minutes_ago = |m: i64| {
+            Timestamp::now()
+                .checked_sub(jiff::SignedDuration::from_secs(m * 60))
+                .unwrap()
+        };
+        assert!(!is_stale(minutes_ago(4), 5));
+        assert!(is_stale(minutes_ago(6), 5));
+        assert!(!is_stale(minutes_ago(600), 0), "0 means only when asked");
     }
 
     #[test]

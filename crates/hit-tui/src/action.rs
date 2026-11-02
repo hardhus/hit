@@ -66,11 +66,6 @@ pub enum DataEvent {
         scope: Scope,
         result: Result<Loaded<Arc<Vec<FocusItem>>>, ForgeError>,
     },
-    UnreadCount {
-        account: AccountId,
-        scope: Scope,
-        result: Result<Loaded<usize>, ForgeError>,
-    },
     Notifications {
         account: AccountId,
         scope: Scope,

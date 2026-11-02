@@ -41,7 +41,8 @@ const CURSOR_GLIDE: Duration = Duration::from_millis(90);
 #[derive(Default)]
 struct AccountData {
     focus: Option<Loaded<Arc<Vec<FocusItem>>>>,
-    unread: Option<Loaded<usize>>,
+    /// From the inbox's loop, which already asks for these.
+    unread: usize,
     error: Option<ForgeError>,
     refreshing: bool,
 }
@@ -572,13 +573,6 @@ impl Tab for FocusTab {
                 every,
                 ctx.sender(),
             ));
-            self.tasks.push(sync::spawn_unread(
-                Arc::clone(forge),
-                ctx.cache.clone(),
-                ctx.scope.clone(),
-                ctx.prefs.refresh.notifications,
-                ctx.sender(),
-            ));
         }
         if self.appeared.is_none() {
             self.appeared = Some(Moment::now());
@@ -715,7 +709,7 @@ impl Tab for FocusTab {
             DataEvent::Refreshing(account) => {
                 self.accounts.entry(account.clone()).or_default().refreshing = true;
             }
-            DataEvent::Focus { scope, .. } | DataEvent::UnreadCount { scope, .. }
+            DataEvent::Focus { scope, .. } | DataEvent::Notifications { scope, .. }
                 if *scope != ctx.scope => {}
             DataEvent::Focus {
                 account, result, ..
@@ -736,14 +730,23 @@ impl Tab for FocusTab {
                 }
                 self.restore_selection(ctx);
             }
-            DataEvent::UnreadCount {
-                account, result, ..
+            // A problem here is the inbox's to report, not a reason to doubt
+            // what Action Required shows.
+            DataEvent::Notifications {
+                account,
+                result: Ok(loaded),
+                ..
+            } => {
+                self.accounts.entry(account.clone()).or_default().unread =
+                    loaded.value.iter().filter(|n| n.unread).count();
+            }
+            DataEvent::MarkedRead {
+                account,
+                ids,
+                result: Ok(()),
             } => {
                 let data = self.accounts.entry(account.clone()).or_default();
-                match result {
-                    Ok(loaded) => data.unread = Some(loaded.clone()),
-                    Err(e) => data.error = Some(e.clone()),
-                }
+                data.unread = data.unread.saturating_sub(ids.len());
             }
             _ => {}
         }
@@ -835,11 +838,7 @@ impl Tab for FocusTab {
             .min_by_key(|f| f.fetched_at);
         let refreshing = data.iter().any(|d| d.refreshing);
         let error = data.iter().find_map(|d| d.error.as_ref());
-        let unread: usize = data
-            .iter()
-            .filter_map(|d| d.unread.as_ref())
-            .map(|u| u.value)
-            .sum();
+        let unread: usize = data.iter().map(|d| d.unread).sum();
         let need: usize = data
             .iter()
             .filter_map(|d| d.focus.as_ref())
