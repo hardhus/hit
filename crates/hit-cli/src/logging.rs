@@ -21,6 +21,7 @@ const DAY: Duration = Duration::from_secs(24 * 60 * 60);
 /// Starts file logging. Keep the returned guard alive until exit so buffered
 /// lines are flushed.
 pub fn init(dir: &Path, config: &LogConfig, cli_level: Option<LogLevel>) -> Result<WorkerGuard> {
+    private_dir(dir);
     let pruned = prune(
         dir,
         config.retention_days,
@@ -54,6 +55,18 @@ pub fn init(dir: &Path, config: &LogConfig, cli_level: Option<LogLevel>) -> Resu
         tracing::warn!(path = %path.display(), %error, "could not remove old log file");
     }
     Ok(guard)
+}
+
+/// Logs name private repositories; other users of the machine have no business
+/// reading them. Best effort: not being able to is no reason not to start.
+fn private_dir(dir: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
+    }
+    #[cfg(not(unix))]
+    let _ = dir;
 }
 
 #[derive(Debug, Default)]

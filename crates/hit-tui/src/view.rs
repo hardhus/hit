@@ -127,6 +127,15 @@ impl Ctx {
         }
     }
 
+    /// A new sign-in, or a new token for an account already here. Read-only
+    /// turned on while hit runs holds for it too.
+    pub(crate) fn add_account(&mut self, forge: Arc<dyn Forge>) {
+        if self.config.auth.read_only {
+            forge.lock_read_only();
+        }
+        self.forges.upsert(forge);
+    }
+
     /// Puts changed settings to work. What needs a restart only takes effect
     /// through `started_config` staying as it was.
     pub(crate) fn apply_config(&mut self, config: &Config) {
@@ -281,6 +290,18 @@ mod tests {
 
         assert_eq!(ctx.scope, Scope::Repo(wanted.clone()));
         assert_eq!(ctx.home_repo, Some(wanted));
+    }
+
+    #[test]
+    fn signing_in_again_does_not_undo_read_only_turned_on_meanwhile() {
+        let spy = Arc::new(Spy {
+            account: AccountId::new(Host::new("example.test"), "someone"),
+            locked: AtomicBool::new(false),
+        });
+        let (mut ctx, _rx) = Ctx::for_tests(Services::default());
+        ctx.config.auth.read_only = true;
+        ctx.add_account(Arc::clone(&spy) as Arc<dyn Forge>);
+        assert!(spy.locked.load(Ordering::Relaxed));
     }
 
     #[test]

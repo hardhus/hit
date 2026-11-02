@@ -206,7 +206,7 @@ impl App {
     }
 
     fn on_action(&mut self, action: Action) {
-        tracing::debug!(?action, "action");
+        tracing::debug!(action = action.name(), "action");
         match action {
             Action::Quit => self.quit = true,
             Action::Back => {
@@ -378,7 +378,7 @@ impl App {
             Action::AccountAdded(ref handle) => {
                 tracing::info!(account = %handle.0.account(), "account added");
                 let first_account = self.ctx.forges.is_empty();
-                self.ctx.forges.upsert(Arc::clone(&handle.0));
+                self.ctx.add_account(Arc::clone(&handle.0));
                 self.views.pop();
                 if first_account {
                     // Leave the empty state: from now on the main screen.
