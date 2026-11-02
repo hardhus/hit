@@ -7,7 +7,7 @@ use hit_config::SortOrder;
 use hit_core::{
     AccountId, ForgeError, ItemRef,
     focus::{FocusItem, FocusReason, FocusSubject},
-    model::{Mergeable, PrState, PullRequest, ReviewDecision},
+    model::{Issue, Mergeable, PrState, PullRequest, ReviewDecision},
 };
 use ratatui::{
     Frame,
@@ -340,9 +340,8 @@ impl FocusTab {
 }
 
 /// The preview of an item, also used by the full-screen detail view.
-pub fn preview_lines(account: &AccountId, item: &FocusItem, ctx: &Ctx) -> Vec<Line<'static>> {
+fn preview_lines(account: &AccountId, item: &FocusItem, ctx: &Ctx) -> Vec<Line<'static>> {
     let t = &ctx.theme;
-    let muted = Style::new().fg(t.muted);
     let mut header = vec![
         chips::subject_icon(&item.subject, t),
         Span::styled(format!(" {}", item.subject.reference()), bold(t.accent)),
@@ -369,60 +368,63 @@ pub fn preview_lines(account: &AccountId, item: &FocusItem, ctx: &Ctx) -> Vec<Li
     lines.push(Line::from(reasons));
     lines.push(Line::raw(""));
 
+    match &item.subject {
+        FocusSubject::PullRequest(pr) => lines.extend(pr_fields(pr, ctx)),
+        FocusSubject::Issue(issue) => lines.extend(issue_fields(issue, ctx)),
+    }
+    lines
+}
+
+/// The fields of an issue (state, author, comments, assignees, labels),
+/// shared by the Focus and Issues previews and the issue screen.
+pub fn issue_fields(issue: &Issue, ctx: &Ctx) -> Vec<Line<'static>> {
+    let t = &ctx.theme;
+    let muted = Style::new().fg(t.muted);
     let field = |name: &str, value: Vec<Span<'static>>| {
         let mut spans = vec![Span::styled(format!("{name:<10}"), muted)];
         spans.extend(value);
         Line::from(spans)
     };
-
-    match &item.subject {
-        FocusSubject::PullRequest(pr) => lines.extend(pr_fields(pr, ctx)),
-        FocusSubject::Issue(issue) => {
-            let state = if issue.is_open() {
-                Span::styled("open", bold(t.success))
-            } else {
-                Span::styled("closed", bold(t.highlight))
-            };
-            lines.push(field("state", vec![state]));
-            lines.push(field(
-                "author",
-                vec![Span::styled(
-                    format!(
-                        "@{} · opened {} · updated {}",
-                        issue.author.login,
-                        sync::ago(issue.created_at),
-                        sync::ago(issue.updated_at)
-                    ),
-                    Style::new().fg(t.fg),
-                )],
-            ));
-            lines.push(field(
-                "comments",
-                vec![Span::styled(
-                    issue.comments.to_string(),
-                    Style::new().fg(t.fg),
-                )],
-            ));
-            if !issue.assignees.is_empty() {
-                let names: Vec<String> = issue
-                    .assignees
-                    .iter()
-                    .map(|u| format!("@{}", u.login))
-                    .collect();
-                lines.push(field(
-                    "assignees",
-                    vec![Span::styled(names.join(", "), Style::new().fg(t.fg))],
-                ));
-            }
-            if !issue.labels.is_empty() {
-                let mut spans = Vec::new();
-                for label in &issue.labels {
-                    spans.push(chips::label_span(label, t));
-                    spans.push(Span::raw(" "));
-                }
-                lines.push(field("labels", spans));
-            }
+    let mut lines = vec![
+        field("state", vec![chips::issue_state_span(issue, t)]),
+        field(
+            "author",
+            vec![Span::styled(
+                format!(
+                    "@{} · opened {} · updated {}",
+                    issue.author.login,
+                    sync::ago(issue.created_at),
+                    sync::ago(issue.updated_at)
+                ),
+                Style::new().fg(t.fg),
+            )],
+        ),
+        field(
+            "comments",
+            vec![Span::styled(
+                issue.comments.to_string(),
+                Style::new().fg(t.fg),
+            )],
+        ),
+    ];
+    if !issue.assignees.is_empty() {
+        let names: Vec<String> = issue
+            .assignees
+            .iter()
+            .map(|u| format!("@{}", u.login))
+            .collect();
+        lines.push(field(
+            "assignees",
+            vec![Span::styled(names.join(", "), Style::new().fg(t.fg))],
+        ));
+    }
+    if !issue.labels.is_empty() {
+        let mut spans = Vec::new();
+        for label in &issue.labels {
+            spans.push(chips::label_span(label, t));
+            spans.push(Span::raw(" "));
         }
+        lines.push(field("labels", spans));
     }
     lines
 }
@@ -628,9 +630,10 @@ impl Tab for FocusTab {
                         item: pr.reference.clone(),
                         summary: Some(Box::new(pr)),
                     },
-                    FocusSubject::Issue(_) => Detail::Focus {
+                    FocusSubject::Issue(issue) => Detail::Issue {
                         account,
-                        item: Box::new(item),
+                        item: issue.reference.clone(),
+                        summary: Some(Box::new(issue)),
                     },
                 }));
             }
@@ -1017,7 +1020,7 @@ mod tests {
         assert!(matches!(
             tab.command(Command::Open, &ctx),
             Some(Action::ShowDetail(
-                Detail::Pull { .. } | Detail::Focus { .. }
+                Detail::Pull { .. } | Detail::Issue { .. }
             ))
         ));
         assert!(

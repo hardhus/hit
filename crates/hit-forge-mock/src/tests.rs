@@ -197,6 +197,16 @@ async fn filters_by_state_author_and_search() {
     assert!(!page.items.is_empty());
     assert!(page.items.iter().all(|i| !i.is_open()));
 
+    let mentioned = IssueQuery {
+        mentioned: Some(DEMO_USER.to_owned()),
+        ..IssueQuery::default()
+    };
+    let page = issues
+        .list(&mentioned, &PageRequest::first(100))
+        .await
+        .unwrap();
+    assert_eq!(page.items.len(), 1, "only the issue whose thread says @you");
+
     let search = PrQuery {
         search: Some("DARK MODE".to_owned()),
         ..PrQuery::default()

@@ -3,14 +3,16 @@
 
 mod focus;
 mod inbox;
+mod issues;
 mod placeholder;
 mod pulls;
 
 use hit_core::{AccountId, ItemRef};
 use ratatui::{Frame, layout::Rect, text::Span};
 
-pub use focus::{FocusTab, pr_fields, preview_lines, spinner};
+pub use focus::{FocusTab, issue_fields, pr_fields, spinner};
 pub use inbox::{InboxTab, notification_lines};
+pub use issues::IssuesTab;
 pub use placeholder::Placeholder;
 pub use pulls::{PullsTab, pr_icon, pr_status_spans};
 

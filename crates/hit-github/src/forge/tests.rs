@@ -256,6 +256,37 @@ async fn pull_request_list_builds_the_search() {
 }
 
 #[tokio::test]
+async fn issue_list_builds_the_search() {
+    let server = MockServer::start().await;
+    graphql_reply(
+        &server,
+        json!({ "search": {
+            "pageInfo": { "hasNextPage": false, "endCursor": null },
+            "nodes": [issue_json("acme/rocket", 8, "mira"), pr_json("acme/rocket", 7, "mira", json!({}))]
+        } }),
+    )
+    .await;
+
+    let query = IssueQuery {
+        assignee: Some(ME.into()),
+        mentioned: Some(ME.into()),
+        ..IssueQuery::default()
+    };
+    let page = Issues::list(&default_forge(&server), &query, &PageRequest::first(50))
+        .await
+        .unwrap();
+    assert_eq!(page.items.len(), 1, "pull requests are filtered out");
+    assert_eq!(page.items[0].reference, ItemRef::issue(rocket(), 8));
+
+    let request = &server.received_requests().await.unwrap()[0];
+    let vars = &body(request)["variables"];
+    assert_eq!(
+        vars["q"],
+        "is:issue archived:false is:open involves:octo assignee:octo mentions:octo sort:updated-desc"
+    );
+}
+
+#[tokio::test]
 async fn invalid_inputs_never_reach_the_network() {
     let server = MockServer::start().await;
     let forge = default_forge(&server);

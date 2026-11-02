@@ -58,6 +58,8 @@ pub struct IssueQuery {
     pub state: StateFilter,
     pub author: Option<String>,
     pub assignee: Option<String>,
+    /// Issues that @-mention this login.
+    pub mentioned: Option<String>,
     pub search: Option<String>,
     pub sort: Sort,
 }

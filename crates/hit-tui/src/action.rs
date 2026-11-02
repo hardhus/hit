@@ -4,7 +4,7 @@ use hit_core::{
     AccountId, Forge, ForgeError, ItemRef,
     auth::DeviceCode,
     focus::FocusItem,
-    model::{Notification, NotificationId, PullRequest, PullRequestDetail},
+    model::{Issue, IssueDetail, Notification, NotificationId, PullRequest, PullRequestDetail},
 };
 
 use crate::{highlight::HighlightedDiff, keymap::Command, sync::Loaded};
@@ -58,6 +58,15 @@ pub enum DataEvent {
         view: &'static str,
         result: Result<Loaded<Arc<Vec<PullRequest>>>, ForgeError>,
     },
+    Issues {
+        account: AccountId,
+        view: &'static str,
+        result: Result<Loaded<Arc<Vec<Issue>>>, ForgeError>,
+    },
+    IssueDetail {
+        item: ItemRef,
+        result: Result<Loaded<Arc<IssueDetail>>, ForgeError>,
+    },
     PullDetail {
         item: ItemRef,
         result: Result<Loaded<Arc<PullRequestDetail>>, ForgeError>,
@@ -88,10 +97,6 @@ pub enum LoginEvent {
 
 #[derive(Debug, Clone)]
 pub enum Detail {
-    Focus {
-        account: AccountId,
-        item: Box<FocusItem>,
-    },
     Notification {
         account: AccountId,
         notification: Box<Notification>,
@@ -101,6 +106,12 @@ pub enum Detail {
         account: AccountId,
         item: ItemRef,
         summary: Option<Box<PullRequest>>,
+    },
+    /// An issue; `summary` (if known) shows while the detail loads.
+    Issue {
+        account: AccountId,
+        item: ItemRef,
+        summary: Option<Box<Issue>>,
     },
 }
 
