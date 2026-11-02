@@ -1,0 +1,36 @@
+[package]
+name = "hit-tui"
+description = "Terminal UI for hit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+crossterm.workspace = true
+futures.workspace = true
+hit-config.workspace = true
+hit-core.workspace = true
+hit-cache.workspace = true
+syntect.workspace = true
+pulldown-cmark.workspace = true
+serde.workspace = true
+jiff.workspace = true
+arboard.workspace = true
+open.workspace = true
+async-trait.workspace = true
+ratatui.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+hit-forge-mock.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "test-util"] }

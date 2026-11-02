@@ -1,0 +1,1099 @@
+//! Provider tests against a mock GitHub. All data is fictional (audit
+//! rules.md): no real accounts, tokens or repositories.
+
+use hit_auth::Secret;
+use hit_core::{
+    AccessHint, Host,
+    model::{CheckState, CloseReason, MergeMethod, ReviewVerdict},
+};
+use serde_json::{Value, json};
+use url::Url;
+use wiremock::{
+    Mock, MockServer, Request, ResponseTemplate,
+    matchers::{body_string_contains, header, method, path, query_param},
+};
+
+use super::*;
+use crate::{ApiOptions, GithubHost};
+
+const ME: &str = "octo";
+
+fn forge(server: &MockServer, options: ApiOptions, focus: FocusOptions) -> GithubForge {
+    let base = Url::parse(&server.uri()).unwrap();
+    let api = Api::new(
+        hit_auth::client().unwrap(),
+        GithubHost::for_tests("github.com", &base),
+        Secret::new("gho_fictional").unwrap(),
+        options,
+    );
+    GithubForge::new(AccountId::new(Host::new("github.com"), ME), api, focus)
+}
+
+fn default_forge(server: &MockServer) -> GithubForge {
+    forge(server, ApiOptions::default(), FocusOptions::default())
+}
+
+fn rocket() -> RepoRef {
+    RepoRef::new(Host::new("github.com"), "acme", "rocket")
+}
+
+fn pr_json(repo: &str, number: u64, author: &str, extra: Value) -> Value {
+    let (owner, name) = repo.split_once('/').unwrap();
+    let mut pr = json!({
+        "__typename": "PullRequest",
+        "number": number,
+        "title": format!("PR {number}"),
+        "url": format!("https://github.com/{repo}/pull/{number}"),
+        "state": "OPEN",
+        "isDraft": false,
+        "createdAt": "2026-10-01T10:00:00Z",
+        "updatedAt": format!("2026-10-2{}T10:00:00Z", number % 10),
+        "closedAt": null,
+        "mergedAt": null,
+        "author": { "__typename": "User", "login": author },
+        "repository": { "name": name, "owner": { "login": owner } },
+        "labels": { "nodes": [{ "name": "bug", "color": "ff4d6d", "description": "" }] },
+        "assignees": { "nodes": [] },
+        "reviewRequests": { "nodes": [
+            { "requestedReviewer": { "__typename": "Team", "combinedSlug": "acme/core" } },
+            { "requestedReviewer": null }
+        ] },
+        "reviewDecision": "REVIEW_REQUIRED",
+        "mergeable": "MERGEABLE",
+        "additions": 10,
+        "deletions": 2,
+        "changedFiles": 1,
+        "comments": { "totalCount": 3 },
+        "headRefName": "feature",
+        "baseRefName": "main",
+        "commits": { "nodes": [{ "commit": { "statusCheckRollup": {
+            "state": "SUCCESS",
+            "contexts": {
+                "checkRunCountsByState": [{ "state": "SUCCESS", "count": 3 }],
+                "statusContextCountsByState": []
+            }
+        } } }] }
+    });
+    if let (Some(pr), Some(extra)) = (pr.as_object_mut(), extra.as_object()) {
+        for (k, v) in extra {
+            pr.insert(k.clone(), v.clone());
+        }
+    }
+    pr
+}
+
+fn issue_json(repo: &str, number: u64, author: &str) -> Value {
+    let (owner, name) = repo.split_once('/').unwrap();
+    json!({
+        "__typename": "Issue",
+        "number": number,
+        "title": format!("Issue {number}"),
+        "url": format!("https://github.com/{repo}/issues/{number}"),
+        "issueState": "OPEN",
+        "stateReason": null,
+        "createdAt": "2026-10-01T10:00:00Z",
+        "updatedAt": format!("2026-10-2{}T10:00:00Z", number % 10),
+        "closedAt": null,
+        "author": { "__typename": "User", "login": author },
+        "repository": { "name": name, "owner": { "login": owner } },
+        "labels": { "nodes": [] },
+        "assignees": { "nodes": [{ "login": ME }] },
+        "comments": { "totalCount": 0 }
+    })
+}
+
+async fn graphql_reply(server: &MockServer, data: Value) {
+    Mock::given(method("POST"))
+        .and(path("/api/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": data })))
+        .mount(server)
+        .await;
+}
+
+fn body(request: &Request) -> Value {
+    serde_json::from_slice(&request.body).unwrap()
+}
+
+#[tokio::test]
+async fn repositories_come_from_rest_without_counts() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/user/repos"))
+        .and(query_param("sort", "pushed"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([{
+            "name": "widget",
+            "owner": { "login": "acme" },
+            "description": null,
+            "private": true,
+            "default_branch": "trunk",
+            "html_url": "https://github.com/acme/widget",
+            "pushed_at": "2026-01-02T03:04:05Z"
+        }])))
+        .mount(&server)
+        .await;
+
+    let page = Repositories::list_mine(&default_forge(&server), &PageRequest::first(100))
+        .await
+        .unwrap();
+    let [repo] = page.items.as_slice() else {
+        panic!("expected one repository");
+    };
+    assert_eq!(repo.reference.to_string(), "acme/widget");
+    assert!(repo.private);
+    assert_eq!(repo.default_branch.as_deref(), Some("trunk"));
+    assert_eq!((repo.open_prs, repo.open_issues), (None, None));
+}
+
+#[tokio::test]
+async fn open_counts_come_page_by_page() {
+    let server = MockServer::start().await;
+    graphql_reply(
+        &server,
+        json!({ "viewer": { "repositories": {
+            "pageInfo": { "hasNextPage": true, "endCursor": "abc" },
+            "nodes": [null, {
+                "name": "widget",
+                "owner": { "login": "acme" },
+                "pullRequests": { "totalCount": 3 },
+                "issues": { "totalCount": 7 }
+            }]
+        }}}),
+    )
+    .await;
+
+    let page = Repositories::open_counts(&default_forge(&server), &PageRequest::first(25))
+        .await
+        .unwrap();
+    assert_eq!(page.next, Some(Cursor("abc".to_owned())));
+    let [counts] = page.items.as_slice() else {
+        panic!("expected one repository");
+    };
+    assert_eq!(counts.reference.to_string(), "acme/widget");
+    assert_eq!((counts.open_prs, counts.open_issues), (3, 7));
+}
+
+#[tokio::test]
+async fn open_counts_retry_with_a_smaller_page_after_a_502() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/graphql"))
+        .and(|request: &Request| body(request)["variables"]["first"] == 25)
+        .respond_with(ResponseTemplate::new(502))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/graphql"))
+        .and(|request: &Request| body(request)["variables"]["first"] == 10)
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": {
+            "viewer": { "repositories": { "nodes": [] } }
+        }})))
+        .mount(&server)
+        .await;
+
+    let page = Repositories::open_counts(&default_forge(&server), &PageRequest::first(25))
+        .await
+        .unwrap();
+    assert!(page.items.is_empty());
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn a_lasting_502_says_the_server_is_in_trouble() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/graphql"))
+        .respond_with(ResponseTemplate::new(502))
+        .mount(&server)
+        .await;
+
+    let error = Repositories::open_counts(&default_forge(&server), &PageRequest::first(25))
+        .await
+        .unwrap_err();
+    assert_eq!(error, ForgeError::Unavailable("502 Bad Gateway".to_owned()));
+    assert!(error.is_retryable());
+}
+
+#[tokio::test]
+async fn focus_merges_categories() {
+    let server = MockServer::start().await;
+    let review = pr_json("acme/rocket", 1, "mira", json!({}));
+    let mine = pr_json(
+        "acme/rocket",
+        2,
+        ME,
+        json!({
+            "reviewDecision": "CHANGES_REQUESTED",
+            "commits": { "nodes": [{ "commit": { "statusCheckRollup": {
+                "state": "FAILURE",
+                "contexts": {
+                    "checkRunCountsByState": [
+                        { "state": "SUCCESS", "count": 2 },
+                        { "state": "FAILURE", "count": 1 }
+                    ],
+                    "statusContextCountsByState": [{ "state": "PENDING", "count": 1 }]
+                }
+            } } }] }
+        }),
+    );
+    let mentioned = issue_json("acme/infra", 3, "sora");
+    let own_issue = issue_json("acme/infra", 4, ME);
+    graphql_reply(
+        &server,
+        json!({
+            "reviews": { "nodes": [review.clone()] },
+            "mine": { "nodes": [mine, null] },
+            "mentions": { "nodes": [mentioned.clone(), review, own_issue] },
+            "assigned": { "nodes": [mentioned, { "__typename": "Discussion" }] }
+        }),
+    )
+    .await;
+
+    let items = default_forge(&server).items(&Scope::All).await.unwrap();
+    let find = |n: u64| items.iter().find(|i| i.subject.reference().number == n);
+
+    assert_eq!(
+        find(1).unwrap().reasons,
+        [FocusReason::ReviewRequested, FocusReason::Mentioned]
+    );
+    let two = find(2).unwrap();
+    assert_eq!(
+        two.reasons,
+        [FocusReason::ChangesRequested, FocusReason::ChecksFailing]
+    );
+    let FocusSubject::PullRequest(pr) = &two.subject else {
+        panic!("expected a pull request");
+    };
+    let checks = pr.checks.unwrap();
+    assert_eq!(
+        (checks.state, checks.passed, checks.failed, checks.pending),
+        (CheckState::Failure, 2, 1, 1)
+    );
+    assert_eq!(
+        find(3).unwrap().reasons,
+        [FocusReason::Mentioned, FocusReason::Assigned]
+    );
+    // Mentions in your own items are not "needs you".
+    assert!(find(4).is_none());
+    assert!(items.windows(2).all(|w| w[0].updated_at >= w[1].updated_at));
+
+    let request = &server.received_requests().await.unwrap()[0];
+    let vars = &body(request)["variables"];
+    assert_eq!(
+        vars["reviews"],
+        "is:open archived:false is:pr review-requested:octo"
+    );
+    assert_eq!(vars["mine"], "is:open archived:false is:pr author:octo");
+    assert!(
+        vars["mentions"]
+            .as_str()
+            .unwrap()
+            .contains("mentions:octo updated:>=")
+    );
+}
+
+#[tokio::test]
+async fn focus_categories_can_be_disabled_and_scoped() {
+    let server = MockServer::start().await;
+    graphql_reply(&server, json!({ "reviews": { "nodes": [] } })).await;
+    let focus = FocusOptions {
+        mentions: false,
+        assigned: false,
+        my_pull_requests: false,
+        ..FocusOptions::default()
+    };
+    let forge = forge(&server, ApiOptions::default(), focus);
+    let items = forge.items(&Scope::Repo(rocket())).await.unwrap();
+    assert!(items.is_empty());
+
+    let request = &server.received_requests().await.unwrap()[0];
+    let vars = &body(request)["variables"];
+    assert_eq!(vars["withReviews"], true);
+    assert_eq!(vars["withMentions"], false);
+    assert_eq!(vars["withAssigned"], false);
+    assert_eq!(vars["withMine"], false);
+    assert!(
+        vars["reviews"]
+            .as_str()
+            .unwrap()
+            .ends_with("repo:acme/rocket")
+    );
+}
+
+#[tokio::test]
+async fn pull_request_list_builds_the_search() {
+    let server = MockServer::start().await;
+    graphql_reply(
+        &server,
+        json!({ "search": {
+            "pageInfo": { "hasNextPage": true, "endCursor": "Y3Vyc29y" },
+            "nodes": [pr_json("acme/rocket", 7, "mira", json!({})), issue_json("acme/rocket", 8, "mira")]
+        } }),
+    )
+    .await;
+
+    let query = PrQuery {
+        scope: Scope::Repo(rocket()),
+        author: Some("mira".into()),
+        search: Some("dark \"mode\"\n".into()),
+        ..PrQuery::default()
+    };
+    let page = PullRequests::list(&default_forge(&server), &query, &PageRequest::first(20))
+        .await
+        .unwrap();
+    assert_eq!(page.items.len(), 1, "issues are filtered out");
+    let pr = &page.items[0];
+    assert_eq!(pr.reference, ItemRef::pull_request(rocket(), 7));
+    assert_eq!(pr.requested_reviewers[0].login, "acme/core");
+    assert_eq!(pr.labels[0].name, "bug");
+    assert_eq!(pr.comments, 3);
+    assert_eq!(page.next, Some(Cursor("Y3Vyc29y".into())));
+
+    let request = &server.received_requests().await.unwrap()[0];
+    let vars = &body(request)["variables"];
+    assert_eq!(
+        vars["q"],
+        "is:pr archived:false is:open repo:acme/rocket author:mira sort:updated-desc dark  mode"
+    );
+    assert_eq!(vars["first"], 20);
+}
+
+#[tokio::test]
+async fn issue_list_builds_the_search() {
+    let server = MockServer::start().await;
+    graphql_reply(
+        &server,
+        json!({ "search": {
+            "pageInfo": { "hasNextPage": false, "endCursor": null },
+            "nodes": [issue_json("acme/rocket", 8, "mira"), pr_json("acme/rocket", 7, "mira", json!({}))]
+        } }),
+    )
+    .await;
+
+    let query = IssueQuery {
+        assignee: Some(ME.into()),
+        mentioned: Some(ME.into()),
+        ..IssueQuery::default()
+    };
+    let page = Issues::list(&default_forge(&server), &query, &PageRequest::first(50))
+        .await
+        .unwrap();
+    assert_eq!(page.items.len(), 1, "pull requests are filtered out");
+    assert_eq!(page.items[0].reference, ItemRef::issue(rocket(), 8));
+
+    let request = &server.received_requests().await.unwrap()[0];
+    let vars = &body(request)["variables"];
+    assert_eq!(
+        vars["q"],
+        "is:issue archived:false is:open involves:octo assignee:octo mentions:octo sort:updated-desc"
+    );
+}
+
+#[tokio::test]
+async fn invalid_inputs_never_reach_the_network() {
+    let server = MockServer::start().await;
+    let forge = default_forge(&server);
+    let evil = RepoRef::new(Host::new("github.com"), "acme", "../../user");
+    assert!(
+        PullRequests::get(&forge, &ItemRef::pull_request(evil.clone(), 1))
+            .await
+            .is_err()
+    );
+    assert!(forge.diff(&ItemRef::pull_request(evil, 1)).await.is_err());
+    let query = PrQuery {
+        author: Some("x author:someone".into()),
+        ..PrQuery::default()
+    };
+    assert!(
+        PullRequests::list(&forge, &query, &PageRequest::default())
+            .await
+            .is_err()
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn pull_request_detail() {
+    let server = MockServer::start().await;
+    let mut pr = pr_json("acme/rocket", 7, "mira", json!({}));
+    let extra = json!({
+        "body": "Adds **dark mode**.",
+        "thread": { "nodes": [{
+            "id": "IC_1", "body": "LGTM", "createdAt": "2026-10-02T10:00:00Z",
+            "updatedAt": "2026-10-02T10:00:00Z", "author": null
+        }] },
+        "reviews": { "nodes": [{
+            "state": "APPROVED", "body": "", "submittedAt": "2026-10-03T10:00:00Z",
+            "author": { "__typename": "Bot", "login": "ci-bot" }
+        }] },
+        "checks": { "nodes": [{ "commit": { "statusCheckRollup": { "contexts": { "nodes": [
+            { "__typename": "CheckRun", "name": "test", "status": "COMPLETED", "conclusion": "FAILURE", "detailsUrl": "https://example.invalid/1" },
+            { "__typename": "CheckRun", "name": "lint", "status": "IN_PROGRESS", "conclusion": null, "detailsUrl": null },
+            { "__typename": "StatusContext", "context": "deploy", "state": "SUCCESS", "targetUrl": null }
+        ] } } } }] }
+    });
+    for (k, v) in extra.as_object().unwrap() {
+        pr.as_object_mut().unwrap().insert(k.clone(), v.clone());
+    }
+    graphql_reply(&server, json!({ "repository": { "pullRequest": pr } })).await;
+
+    let detail = PullRequests::get(&default_forge(&server), &ItemRef::pull_request(rocket(), 7))
+        .await
+        .unwrap();
+    assert_eq!(detail.body, "Adds **dark mode**.");
+    assert_eq!(detail.comments[0].author.login, "ghost");
+    assert!(detail.reviews[0].author.is_bot);
+    let states: Vec<_> = detail.checks.iter().map(|c| c.state).collect();
+    assert_eq!(
+        states,
+        [
+            CheckState::Failure,
+            CheckState::Pending,
+            CheckState::Success
+        ]
+    );
+}
+
+#[tokio::test]
+async fn missing_items_and_graphql_errors() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/graphql"))
+        .and(body_string_contains("query Issue"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": null,
+            "errors": [{ "type": "NOT_FOUND", "message": "Could not resolve to a Repository" }]
+        })))
+        .mount(&server)
+        .await;
+    graphql_reply(&server, json!({ "repository": { "pullRequest": null } })).await;
+    let forge = default_forge(&server);
+    assert_eq!(
+        Issues::get(&forge, &ItemRef::issue(rocket(), 1)).await,
+        Err(ForgeError::NotFound)
+    );
+    assert_eq!(
+        PullRequests::get(&forge, &ItemRef::pull_request(rocket(), 1)).await,
+        Err(ForgeError::NotFound)
+    );
+}
+
+#[tokio::test]
+async fn diff_uses_the_diff_media_type() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/repos/acme/rocket/pulls/7"))
+        .and(header("accept", "application/vnd.github.diff"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-x\n+y\n",
+        ))
+        .mount(&server)
+        .await;
+    let diff = default_forge(&server)
+        .diff(&ItemRef::pull_request(rocket(), 7))
+        .await
+        .unwrap();
+    assert_eq!((diff.additions(), diff.deletions()), (1, 1));
+}
+
+fn notification_json(id: &str, kind: &str, number: Option<u64>, reason: &str) -> Value {
+    json!({
+        "id": id,
+        "unread": true,
+        "reason": reason,
+        "updated_at": "2026-10-28T10:00:00Z",
+        "subject": {
+            "title": format!("subject {id}"),
+            "url": number.map(|n| format!("https://api.github.com/repos/acme/rocket/{}/{n}",
+                if kind == "PullRequest" { "pulls" } else { "issues" })),
+            "type": kind
+        },
+        "repository": {
+            "name": "rocket", "owner": { "login": "acme" },
+            "html_url": "https://github.com/acme/rocket"
+        }
+    })
+}
+
+#[tokio::test]
+async fn notifications_link_to_the_right_page() {
+    let server = MockServer::start().await;
+    let subject = |kind: &str, url: Option<&str>| {
+        let mut json = notification_json("1", kind, None, "subscribed");
+        json["subject"]["url"] = json!(url);
+        json
+    };
+    Mock::given(method("GET"))
+        .and(path("/api/notifications"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            subject("CheckSuite", None),
+            subject(
+                "Release",
+                Some("https://api.github.com/repos/acme/rocket/releases/9")
+            ),
+            subject(
+                "Commit",
+                Some("https://api.github.com/repos/acme/rocket/commits/abc123")
+            ),
+            subject(
+                "Commit",
+                Some("https://api.github.com/repos/acme/rocket/commits/../x")
+            ),
+            subject(
+                "Discussion",
+                Some("https://api.github.com/repos/acme/rocket/discussions/4")
+            ),
+            subject("Discussion", None),
+            subject("RepositoryInvitation", None),
+        ])))
+        .mount(&server)
+        .await;
+    let page = Notifications::list(
+        &default_forge(&server),
+        &NotificationQuery::default(),
+        &PageRequest::first(50),
+    )
+    .await
+    .unwrap();
+    let links: Vec<&str> = page
+        .items
+        .iter()
+        .map(|n| n.subject.url.as_deref().unwrap())
+        .map(|url| url.split("acme/rocket").nth(1).unwrap())
+        .collect();
+    assert_eq!(
+        links,
+        [
+            "/actions",
+            "/releases",
+            "/commit/abc123",
+            "/commits",
+            "/discussions/4",
+            "/discussions",
+            "",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_long_conversation_keeps_its_latest_comments_and_lines() {
+    let server = MockServer::start().await;
+    let comment = |body: &str| {
+        json!({
+            "id": "1", "body": body,
+            "createdAt": "2026-10-01T10:00:00Z", "updatedAt": "2026-10-01T10:00:00Z",
+            "author": { "__typename": "User", "login": "mira" }
+        })
+    };
+    let mut pr = pr_json("acme/rocket", 7, "mira", json!({}));
+    pr["body"] = json!("");
+    pr["thread"] = json!({ "totalCount": 120, "nodes": [comment("latest")] });
+    pr["reviewThreads"] = json!({ "nodes": [{
+        "path": "src/main.rs", "line": 42, "isResolved": false, "isOutdated": true,
+        "comments": { "nodes": [comment("why this?")] }
+    }, {
+        "path": "src/gone.rs", "line": null, "isResolved": true, "isOutdated": false,
+        "comments": { "nodes": [] }
+    }] });
+    graphql_reply(&server, json!({ "repository": { "pullRequest": pr } })).await;
+
+    let detail = PullRequests::get(&default_forge(&server), &ItemRef::pull_request(rocket(), 7))
+        .await
+        .unwrap();
+    assert_eq!(detail.comments[0].body, "latest");
+    assert_eq!(detail.earlier_comments, 119);
+    let [open, done] = detail.review_threads.as_slice() else {
+        panic!("expected two threads");
+    };
+    assert_eq!(
+        (open.path.as_str(), open.line, open.resolved),
+        ("src/main.rs", Some(42), false)
+    );
+    assert!(open.outdated);
+    assert_eq!(open.comments[0].body, "why this?");
+    assert_eq!((done.line, done.resolved), (None, true));
+}
+
+#[tokio::test]
+async fn a_comment_goes_to_the_conversation() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/repos/acme/rocket/issues/7/comments"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({})))
+        .mount(&server)
+        .await;
+    ItemActions::comment(
+        &default_forge(&server),
+        &ItemRef::pull_request(rocket(), 7),
+        "looks good",
+    )
+    .await
+    .unwrap();
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(body(&requests[0])["body"], "looks good");
+}
+
+#[tokio::test]
+async fn a_read_only_account_writes_nothing() {
+    let server = MockServer::start().await;
+    let forge = forge(
+        &server,
+        ApiOptions {
+            read_only: true,
+            allow_mark_read: true,
+        },
+        FocusOptions::default(),
+    );
+    let item = ItemRef::pull_request(rocket(), 7);
+    let refused = |result: Result<()>| assert!(matches!(result, Err(ForgeError::ReadOnly(_))));
+    refused(ItemActions::comment(&forge, &item, "x").await);
+    refused(ItemActions::review(&forge, &item, ReviewVerdict::Approve, "").await);
+    refused(ItemActions::merge(&forge, &item, MergeMethod::Squash).await);
+    refused(ItemActions::delete_branch(&forge, &item, "topic").await);
+    refused(ItemActions::set_open(&forge, &item, false, None).await);
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+/// A server that answers `POST`, `PUT`, `PATCH` and `DELETE` with success and
+/// remembers what it was asked.
+async fn write_server() -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(wiremock::matchers::any())
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(&server)
+        .await;
+    server
+}
+
+async fn the_only_request(server: &MockServer) -> (String, String, Value) {
+    let requests = server.received_requests().await.unwrap();
+    let [request] = requests.as_slice() else {
+        panic!("expected one request: {requests:?}");
+    };
+    let sent = serde_json::from_slice(&request.body).unwrap_or(Value::Null);
+    (
+        request.method.to_string(),
+        request.url.path().to_owned(),
+        sent,
+    )
+}
+
+#[tokio::test]
+async fn reviews_merges_and_closing_ask_for_the_right_thing() {
+    let pr = ItemRef::pull_request(rocket(), 7);
+    let issue = ItemRef::issue(rocket(), 8);
+
+    let server = write_server().await;
+    ItemActions::review(&default_forge(&server), &pr, ReviewVerdict::Approve, "ok")
+        .await
+        .unwrap();
+    let (verb, url, sent) = the_only_request(&server).await;
+    assert_eq!(
+        (verb.as_str(), url.as_str()),
+        ("POST", "/api/repos/acme/rocket/pulls/7/reviews")
+    );
+    assert_eq!(
+        (&sent["event"], &sent["body"]),
+        (&json!("APPROVE"), &json!("ok"))
+    );
+
+    let server = write_server().await;
+    ItemActions::review(
+        &default_forge(&server),
+        &pr,
+        ReviewVerdict::RequestChanges,
+        "fix",
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        the_only_request(&server).await.2["event"],
+        "REQUEST_CHANGES"
+    );
+
+    let server = write_server().await;
+    ItemActions::merge(&default_forge(&server), &pr, MergeMethod::Squash)
+        .await
+        .unwrap();
+    let (verb, url, sent) = the_only_request(&server).await;
+    assert_eq!(
+        (verb.as_str(), url.as_str()),
+        ("PUT", "/api/repos/acme/rocket/pulls/7/merge")
+    );
+    assert_eq!(sent["merge_method"], "squash");
+
+    let server = write_server().await;
+    ItemActions::delete_branch(&default_forge(&server), &pr, "me/topic")
+        .await
+        .unwrap();
+    let (verb, url, _) = the_only_request(&server).await;
+    assert_eq!(
+        (verb.as_str(), url.as_str()),
+        ("DELETE", "/api/repos/acme/rocket/git/refs/heads/me/topic")
+    );
+
+    let server = write_server().await;
+    ItemActions::set_open(&default_forge(&server), &pr, false, None)
+        .await
+        .unwrap();
+    let (verb, url, sent) = the_only_request(&server).await;
+    assert_eq!(
+        (verb.as_str(), url.as_str()),
+        ("PATCH", "/api/repos/acme/rocket/pulls/7")
+    );
+    assert_eq!(sent, json!({ "state": "closed" }));
+
+    let server = write_server().await;
+    ItemActions::set_open(
+        &default_forge(&server),
+        &issue,
+        false,
+        Some(CloseReason::NotPlanned),
+    )
+    .await
+    .unwrap();
+    let (_, url, sent) = the_only_request(&server).await;
+    assert_eq!(url, "/api/repos/acme/rocket/issues/8");
+    assert_eq!(
+        sent,
+        json!({ "state": "closed", "state_reason": "not_planned" })
+    );
+
+    let server = write_server().await;
+    ItemActions::set_open(&default_forge(&server), &issue, true, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        the_only_request(&server).await.2,
+        json!({ "state": "open" })
+    );
+}
+
+#[tokio::test]
+async fn a_strange_branch_name_is_never_put_in_an_address() {
+    let server = MockServer::start().await;
+    for branch in ["a?b", "a#b", "a b", "../../x"] {
+        let result = ItemActions::delete_branch(
+            &default_forge(&server),
+            &ItemRef::pull_request(rocket(), 7),
+            branch,
+        )
+        .await;
+        assert!(result.is_err(), "{branch}");
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_branch_already_gone_is_not_a_problem() {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .respond_with(ResponseTemplate::new(422).set_body_json(json!({
+            "message": "Reference does not exist"
+        })))
+        .mount(&server)
+        .await;
+    ItemActions::delete_branch(
+        &default_forge(&server),
+        &ItemRef::pull_request(rocket(), 7),
+        "topic",
+    )
+    .await
+    .unwrap();
+}
+
+fn merge_reply(status: &str, cross: bool) -> Value {
+    json!({ "repository": {
+        "mergeCommitAllowed": false,
+        "squashMergeAllowed": true,
+        "rebaseMergeAllowed": true,
+        "viewerDefaultMergeMethod": "MERGE",
+        "pullRequest": {
+            "state": "OPEN",
+            "isDraft": false,
+            "isCrossRepository": cross,
+            "mergeStateStatus": status,
+            "headRefName": "topic",
+            "baseRefName": "main"
+        }
+    }})
+}
+
+#[tokio::test]
+async fn merge_options_say_what_is_allowed_and_what_stands_in_the_way() {
+    let get = |status: &'static str, cross| async move {
+        let server = MockServer::start().await;
+        graphql_reply(&server, merge_reply(status, cross)).await;
+        ItemActions::merge_options(&default_forge(&server), &ItemRef::pull_request(rocket(), 7))
+            .await
+            .unwrap()
+    };
+
+    let clean = get("CLEAN", false).await;
+    assert_eq!(clean.allowed, [MergeMethod::Squash, MergeMethod::Rebase]);
+    assert_eq!(
+        clean.default,
+        MergeMethod::Squash,
+        "merge commits are off here"
+    );
+    assert_eq!(
+        (clean.blocked.as_deref(), clean.warning.as_deref()),
+        (None, None)
+    );
+    assert!(clean.can_delete_branch);
+
+    assert!(
+        get("DIRTY", false)
+            .await
+            .blocked
+            .unwrap()
+            .contains("conflicts")
+    );
+    assert!(get("BLOCKED", false).await.blocked.is_some());
+    let unstable = get("UNSTABLE", false).await;
+    assert!(unstable.blocked.is_none() && unstable.warning.is_some());
+    assert!(
+        !get("CLEAN", true).await.can_delete_branch,
+        "a fork's branch is not ours to delete: a same-named one here could be"
+    );
+}
+
+#[tokio::test]
+async fn failed_checks_run_again_for_the_pull_request_s_own_commit() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/repos/acme/rocket/pulls/7"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "head": { "sha": "abc123" }
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/repos/acme/rocket/actions/runs"))
+        .and(query_param("head_sha", "abc123"))
+        .and(query_param("status", "failure"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "workflow_runs": [{ "id": 11 }, { "id": 12 }]
+        })))
+        .mount(&server)
+        .await;
+    for id in [11, 12] {
+        Mock::given(method("POST"))
+            .and(path(format!(
+                "/api/repos/acme/rocket/actions/runs/{id}/rerun-failed-jobs"
+            )))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+    let count =
+        ItemActions::rerun_failed(&default_forge(&server), &ItemRef::pull_request(rocket(), 7))
+            .await
+            .unwrap();
+    assert_eq!(count, 2);
+}
+
+#[tokio::test]
+async fn no_failed_runs_is_said_plainly() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/repos/acme/rocket/pulls/7"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "head": { "sha": "abc123" }
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/repos/acme/rocket/actions/runs"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "workflow_runs": [] })))
+        .mount(&server)
+        .await;
+    let error =
+        ItemActions::rerun_failed(&default_forge(&server), &ItemRef::pull_request(rocket(), 7))
+            .await
+            .unwrap_err();
+    assert!(matches!(error, ForgeError::Rejected(_)));
+}
+
+#[tokio::test]
+async fn the_forge_s_reason_for_refusing_is_kept() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(422).set_body_json(json!({
+            "message": "Validation Failed",
+            "errors": [{ "message": "Body is too long" }]
+        })))
+        .mount(&server)
+        .await;
+    let error = ItemActions::comment(
+        &default_forge(&server),
+        &ItemRef::pull_request(rocket(), 7),
+        "x",
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error, ForgeError::Rejected("Body is too long".to_owned()));
+}
+
+#[tokio::test]
+async fn notifications_list_and_paging() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/notifications"))
+        .and(query_param("all", "false"))
+        .and(query_param("page", "1"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header(
+                    "link",
+                    "<https://api.github.com/notifications?all=false&page=2>; rel=\"next\", \
+                     <https://api.github.com/notifications?all=false&page=5>; rel=\"last\"",
+                )
+                .set_body_json(json!([
+                    notification_json("11", "PullRequest", Some(7), "review_requested"),
+                    notification_json("12", "Issue", Some(8), "mention"),
+                    notification_json("13", "Release", None, "subscribed"),
+                    notification_json("14", "Issue", Some(9), "brand_new_reason"),
+                ])),
+        )
+        .mount(&server)
+        .await;
+
+    let query = NotificationQuery {
+        unread_only: true,
+        ..NotificationQuery::default()
+    };
+    let page = Notifications::list(&default_forge(&server), &query, &PageRequest::first(50))
+        .await
+        .unwrap();
+    assert_eq!(page.next, Some(Cursor("2".into())));
+    let [pr, issue, release, other] = page.items.as_slice() else {
+        panic!("expected four notifications");
+    };
+    assert_eq!(pr.subject.item, Some(ItemRef::pull_request(rocket(), 7)));
+    assert_eq!(
+        pr.subject.url.as_deref(),
+        Some(format!("{}acme/rocket/pull/7", server.uri() + "/").as_str())
+    );
+    assert_eq!(issue.subject.item, Some(ItemRef::issue(rocket(), 8)));
+    assert_eq!(release.subject.item, None);
+    assert_eq!(
+        other.reason,
+        hit_core::model::NotificationReason::Other("brand_new_reason".into())
+    );
+}
+
+#[tokio::test]
+async fn mark_read_respects_read_only() {
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/api/notifications/threads/11"))
+        .respond_with(ResponseTemplate::new(205))
+        .mount(&server)
+        .await;
+    let id = NotificationId("11".into());
+
+    let read_only = ApiOptions {
+        read_only: true,
+        allow_mark_read: false,
+    };
+    let forge_ro = forge(&server, read_only, FocusOptions::default());
+    assert!(matches!(
+        forge_ro.mark_read(&id).await,
+        Err(ForgeError::ReadOnly(_))
+    ));
+    assert!(server.received_requests().await.unwrap().is_empty());
+
+    let allowed = ApiOptions {
+        read_only: true,
+        allow_mark_read: true,
+    };
+    forge(&server, allowed, FocusOptions::default())
+        .mark_read(&id)
+        .await
+        .unwrap();
+    default_forge(&server).mark_read(&id).await.unwrap();
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+    assert!(
+        default_forge(&server)
+            .mark_read(&NotificationId("../user".into()))
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn sso_partial_results_keep_data() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": { "reviews": { "nodes": [pr_json("acme/rocket", 1, "mira", json!({}))] } },
+            "errors": [{ "type": "FORBIDDEN", "message": "Resource protected by organization SAML enforcement." }]
+        })))
+        .mount(&server)
+        .await;
+    let focus = FocusOptions {
+        my_pull_requests: false,
+        mentions: false,
+        assigned: false,
+        ..FocusOptions::default()
+    };
+    let items = forge(&server, ApiOptions::default(), focus)
+        .items(&Scope::All)
+        .await
+        .unwrap();
+    assert_eq!(items.len(), 1);
+    let _ = AccessHint::SsoPartial { org_ids: vec![] };
+}
+
+#[tokio::test]
+async fn notifications_revalidate_with_etag() {
+    let server = MockServer::start().await;
+    // First mounted mock wins: the 304 only matches revalidations.
+    Mock::given(method("GET"))
+        .and(path("/api/notifications"))
+        .and(header("if-none-match", "\"v1\""))
+        .respond_with(ResponseTemplate::new(304).insert_header("x-poll-interval", "120"))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/notifications"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("etag", "\"v1\"")
+                .insert_header("x-poll-interval", "60")
+                .set_body_json(json!([notification_json(
+                    "11",
+                    "PullRequest",
+                    Some(7),
+                    "review_requested"
+                )])),
+        )
+        .mount(&server)
+        .await;
+
+    let forge = default_forge(&server);
+    assert_eq!(Notifications::poll_interval(&forge), None);
+    let query = NotificationQuery::default();
+    let first = Notifications::list(&forge, &query, &PageRequest::first(50))
+        .await
+        .unwrap();
+    assert_eq!(
+        Notifications::poll_interval(&forge),
+        Some(std::time::Duration::from_secs(60))
+    );
+    let second = Notifications::list(&forge, &query, &PageRequest::first(50))
+        .await
+        .unwrap();
+    assert_eq!(first.items, second.items, "304 reuses the stored body");
+    assert_eq!(
+        Notifications::poll_interval(&forge),
+        Some(std::time::Duration::from_secs(120))
+    );
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[0].headers.get("if-none-match").is_none());
+    assert_eq!(requests[1].headers.get("if-none-match").unwrap(), "\"v1\"");
+}

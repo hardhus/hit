@@ -1,0 +1,21 @@
+# Action Required: one request, one search per enabled category.
+query Focus(
+  $reviews: String!, $withReviews: Boolean!,
+  $mine: String!, $withMine: Boolean!,
+  $mentions: String!, $withMentions: Boolean!,
+  $assigned: String!, $withAssigned: Boolean!,
+  $first: Int!
+) {
+  reviews: search(query: $reviews, type: ISSUE, first: $first) @include(if: $withReviews) {
+    nodes { __typename ...Pr ...Iss }
+  }
+  mine: search(query: $mine, type: ISSUE, first: $first) @include(if: $withMine) {
+    nodes { __typename ...Pr ...Iss }
+  }
+  mentions: search(query: $mentions, type: ISSUE, first: $first) @include(if: $withMentions) {
+    nodes { __typename ...Pr ...Iss }
+  }
+  assigned: search(query: $assigned, type: ISSUE, first: $first) @include(if: $withAssigned) {
+    nodes { __typename ...Pr ...Iss }
+  }
+}
