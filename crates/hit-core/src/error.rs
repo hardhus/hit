@@ -28,6 +28,10 @@ pub enum ForgeError {
     Unsupported(&'static str),
     #[error("unexpected response from the forge: {0}")]
     InvalidResponse(String),
+    /// The forge understood and refused; its reason is worth showing as is
+    /// (e.g. you cannot approve your own pull request).
+    #[error("{0}")]
+    Rejected(String),
     /// Blocked locally: the account is in read-only mode.
     #[error("{0} is blocked: this account is read-only in hit")]
     ReadOnly(String),

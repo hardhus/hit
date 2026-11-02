@@ -10,6 +10,7 @@ mod app;
 mod browser;
 mod error;
 mod event;
+mod external_editor;
 mod highlight;
 pub mod keymap;
 pub mod layout;

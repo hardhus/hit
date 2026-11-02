@@ -27,7 +27,7 @@ use tokio::task::JoinHandle;
 use super::{FocusAsks, JumpTarget, Tab, TabArea, focus::spinner, pr_fields};
 use crate::{
     Action, Ctx, DataEvent, Event,
-    action::{Detail, Toast},
+    action::{Detail, Target, Toast},
     anim::{Moment, Tween},
     browser,
     keymap::{Command, typed_char},
@@ -922,6 +922,14 @@ impl Tab for PullsTab {
             .values()
             .any(|d| d.items.is_none() && d.error.is_none());
         entering || gliding || loading
+    }
+
+    fn action_target(&self, ctx: &Ctx) -> Option<Target> {
+        let (account, pr) = self.selected_pr(ctx)?;
+        Some(Target {
+            account,
+            item: pr.reference,
+        })
     }
 
     fn shown(&mut self) {

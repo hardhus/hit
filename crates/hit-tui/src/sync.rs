@@ -21,7 +21,7 @@ use hit_core::{
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::{sync::mpsc, task::JoinHandle};
 
-use crate::{Action, DataEvent, Theme, Toast, highlight::highlight_diff};
+use crate::{Action, DataEvent, Theme, Toast, action::Target, highlight::highlight_diff};
 
 /// A value and where it came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -352,6 +352,30 @@ pub fn spawn_mark_read(
 /// the user wants that; 0 means only when asked.
 pub fn is_stale(at: Timestamp, minutes: u32) -> bool {
     minutes > 0 && Timestamp::now().duration_since(at).as_secs() >= i64::from(minutes) * 60
+}
+
+/// Sends a comment. It finishes even if the screen that asked goes away: once
+/// on its way, leaving does not unsend it.
+pub fn spawn_comment(
+    forge: Arc<dyn Forge>,
+    target: Target,
+    body: String,
+    tx: mpsc::UnboundedSender<Action>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let result = match forge.actions() {
+            Some(actions) => actions.comment(&target.item, &body).await,
+            None => Err(ForgeError::Unsupported("comments")),
+        };
+        if let Err(e) = &result {
+            tracing::warn!(error = %e, item = %target.item, "could not comment");
+        }
+        let _ = tx.send(Action::Data(DataEvent::ActionDone {
+            target,
+            what: "commented",
+            result,
+        }));
+    })
 }
 
 /// Pull requests and issues per page.

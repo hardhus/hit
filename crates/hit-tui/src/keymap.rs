@@ -78,6 +78,7 @@ commands! {
     PageUp       => "page_up",       List,   "Page up",                          ["ctrl+u", "pageup"];
     PageDown     => "page_down",     List,   "Page down",                        ["ctrl+d", "pagedown"];
     Open         => "open",          List,   "Open the selected item",           ["enter"];
+    Actions      => "actions",       List,   "What can be done with this item",  ["x"];
     Back         => "back",          List,   "Back / close",                     ["esc"];
     Filter       => "filter",        List,   "Filter the list",                  ["/"];
     Browser      => "browser",       List,   "Open in the browser",              ["o"];
@@ -402,7 +403,7 @@ mod tests {
             lookup(KeyCode::BackTab, KeyModifiers::SHIFT),
             Some(Command::PrevTab)
         );
-        assert_eq!(lookup(KeyCode::Char('x'), KeyModifiers::NONE), None);
+        assert_eq!(lookup(KeyCode::Char('z'), KeyModifiers::NONE), None);
         // List keys are inactive outside lists.
         assert_eq!(
             map.lookup(

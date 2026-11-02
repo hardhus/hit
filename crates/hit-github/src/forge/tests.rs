@@ -611,6 +611,64 @@ async fn a_long_conversation_keeps_its_latest_comments_and_lines() {
 }
 
 #[tokio::test]
+async fn a_comment_goes_to_the_conversation() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/repos/acme/rocket/issues/7/comments"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({})))
+        .mount(&server)
+        .await;
+    ItemActions::comment(
+        &default_forge(&server),
+        &ItemRef::pull_request(rocket(), 7),
+        "looks good",
+    )
+    .await
+    .unwrap();
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(body(&requests[0])["body"], "looks good");
+}
+
+#[tokio::test]
+async fn a_read_only_account_writes_nothing() {
+    let server = MockServer::start().await;
+    let forge = forge(
+        &server,
+        ApiOptions {
+            read_only: true,
+            allow_mark_read: true,
+        },
+        FocusOptions::default(),
+    );
+    let result = ItemActions::comment(&forge, &ItemRef::pull_request(rocket(), 7), "x").await;
+    assert!(matches!(result, Err(ForgeError::ReadOnly(_))));
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn the_forge_s_reason_for_refusing_is_kept() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(422).set_body_json(json!({
+            "message": "Validation Failed",
+            "errors": [{ "message": "Body is too long" }]
+        })))
+        .mount(&server)
+        .await;
+    let error = ItemActions::comment(
+        &default_forge(&server),
+        &ItemRef::pull_request(rocket(), 7),
+        "x",
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        error,
+        ForgeError::Rejected("Validation Failed: Body is too long".to_owned())
+    );
+}
+
+#[tokio::test]
 async fn notifications_list_and_paging() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))

@@ -33,6 +33,22 @@ impl EventSource {
         self.rx.recv().await
     }
 
+    /// Stops reading until [`Self::resume`], so another program can have the
+    /// terminal's input.
+    pub(crate) async fn pause(&mut self) {
+        self.cancel.cancel();
+        if let Err(e) = (&mut self.task).await {
+            tracing::warn!(error = %e, "input task did not finish cleanly");
+        }
+    }
+
+    pub(crate) fn resume(&mut self) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.cancel = CancellationToken::new();
+        self.task = tokio::spawn(read_loop(tx, self.cancel.clone()));
+        self.rx = rx;
+    }
+
     pub(crate) async fn stop(self) {
         self.cancel.cancel();
         if let Err(e) = self.task.await {

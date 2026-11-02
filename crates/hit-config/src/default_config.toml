@@ -8,6 +8,9 @@
 [general]
 # Inside a git repository, open on that repository (press . for everything).
 # repo_context = true
+# Where comments are written: "box" inside hit (ctrl+e moves to your editor) or
+# "editor" to go straight to $VISUAL or $EDITOR.
+# compose = "box"
 
 [ui]
 # Keep the terminal background visible behind hit.

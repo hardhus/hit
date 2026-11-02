@@ -137,6 +137,18 @@ impl Shell {
                 self.toasts.push(Toast::info("pick a repository"));
             }
             Command::Settings => return Some(Action::OpenSettings),
+            Command::Actions => {
+                match self
+                    .tabs
+                    .get(self.active)
+                    .and_then(|tab| tab.action_target(ctx))
+                {
+                    Some(target) => return Some(Action::OpenActions(target)),
+                    None => self
+                        .toasts
+                        .push(Toast::info("select a pull request or an issue")),
+                }
+            }
             Command::SignIn => {
                 if Self::can_sign_in_here(ctx) {
                     return Some(Action::OpenLogin);
@@ -513,6 +525,12 @@ impl View for Shell {
                 None => "showing all accounts".to_owned(),
             })),
             Action::ConfigChanged(change) if change.reload => self.reload_pending = true,
+            // What was changed shows up everywhere it is listed.
+            Action::Data(crate::DataEvent::ActionDone { result: Ok(()), .. }) => {
+                for tab in &mut self.tabs {
+                    tab.mount(ctx);
+                }
+            }
             // Signed in again: fresh loops with the new token, nothing else moves.
             Action::AccountAdded(_) => {
                 for tab in &mut self.tabs {
@@ -548,6 +566,10 @@ impl View for Shell {
             tab.update(action, ctx);
         }
         None
+    }
+
+    fn shows_toasts(&self) -> bool {
+        true
     }
 
     fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) {
@@ -628,6 +650,13 @@ impl View for Shell {
             .get(self.active)
             .map(|tab| tab.hints().to_vec())
             .unwrap_or_default();
+        if self
+            .tabs
+            .get(self.active)
+            .is_some_and(|tab| tab.action_target(ctx).is_some())
+        {
+            items.insert(0, (&[Command::Actions], "actions"));
+        }
         items.push((
             &[Command::ToggleScope],
             if ctx.scope.repo().is_some() {

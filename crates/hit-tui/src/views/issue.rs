@@ -18,7 +18,7 @@ use tokio::task::JoinHandle;
 use super::thread;
 use crate::{
     Action, Ctx, DataEvent, Event, View,
-    action::Toast,
+    action::{Target, Toast},
     anim::Moment,
     browser,
     keymap::{Command, Scope},
@@ -106,6 +106,7 @@ impl IssueView {
     fn hints(&self, width: u16, ctx: &Ctx) -> Line<'static> {
         crate::ui::hints::line(
             &[
+                (&[Command::Actions], "actions"),
                 (&[Command::Down, Command::Up], "scroll"),
                 (&[Command::Browser], "browser"),
                 (&[Command::Refresh], "refresh"),
@@ -150,6 +151,12 @@ impl View for IssueView {
         match ctx.keymap.lookup(key, &[Scope::List, Scope::Global])? {
             Command::Back => return Some(Action::Back),
             Command::Quit => return Some(Action::Quit),
+            Command::Actions => {
+                return Some(Action::OpenActions(Target {
+                    account: self.account.clone(),
+                    item: self.item.clone(),
+                }));
+            }
             Command::Down => self.scroll = self.scroll.saturating_add(1),
             Command::Up => self.scroll = self.scroll.saturating_sub(1),
             Command::PageDown => self.scroll = self.scroll.saturating_add(15),
@@ -172,7 +179,16 @@ impl View for IssueView {
         Some(Action::Redraw)
     }
 
-    fn update(&mut self, action: &Action, _ctx: &Ctx) -> Option<Action> {
+    fn update(&mut self, action: &Action, ctx: &Ctx) -> Option<Action> {
+        if let Action::Data(DataEvent::ActionDone {
+            target,
+            result: Ok(()),
+            ..
+        }) = action
+            && target.item == self.item
+        {
+            self.mount(ctx);
+        }
         if let Action::Data(DataEvent::IssueDetail { item, result }) = action
             && *item == self.item
         {

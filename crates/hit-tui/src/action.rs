@@ -44,8 +44,28 @@ pub enum Action {
     Run(Command),
     /// Open the settings screen.
     OpenSettings,
+    /// What can be done with this item.
+    OpenActions(Target),
+    /// Write a comment.
+    Compose(Target),
+    /// Leave the comment box, keeping `draft` for next time.
+    CloseCompose {
+        target: Target,
+        draft: String,
+    },
+    /// Hand the terminal to the user's editor with this text.
+    EditInEditor(String),
+    /// The editor closed.
+    EditorDone(Result<String, String>),
     /// A setting changed: apply it now.
     ConfigChanged(ConfigChange),
+}
+
+/// A pull request or issue, and the account to act with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Target {
+    pub account: AccountId,
+    pub item: ItemRef,
 }
 
 #[derive(Debug, Clone)]
@@ -61,6 +81,13 @@ pub struct ConfigChange {
 pub enum DataEvent {
     /// A refresh round started.
     Refreshing(AccountId),
+    /// Something was changed on the forge.
+    ActionDone {
+        target: Target,
+        /// For the message: "commented".
+        what: &'static str,
+        result: Result<(), ForgeError>,
+    },
     Focus {
         account: AccountId,
         scope: Scope,

@@ -10,8 +10,8 @@ use std::{
 
 use async_trait::async_trait;
 use hit_core::{
-    AccountId, Focus, Forge, ForgeError, ForgeKind, Issues, ItemRef, Notifications, PullRequests,
-    RepoRef, Repositories, Result, Timestamp,
+    AccountId, Focus, Forge, ForgeError, ForgeKind, Issues, ItemActions, ItemRef, Notifications,
+    PullRequests, RepoRef, Repositories, Result, Timestamp,
     diff::Diff,
     focus::{self, FocusItem, FocusReason, FocusSubject},
     model::{
@@ -141,6 +141,10 @@ impl Forge for GithubForge {
     }
 
     fn repositories(&self) -> Option<&dyn Repositories> {
+        Some(self)
+    }
+
+    fn actions(&self) -> Option<&dyn ItemActions> {
         Some(self)
     }
 
@@ -426,6 +430,22 @@ impl Notifications for GithubForge {
         };
         self.api
             .send_json(Method::PUT, &path, Op::MarkRead, &json!({ "read": true }))
+            .await?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ItemActions for GithubForge {
+    async fn comment(&self, item: &ItemRef, body: &str) -> Result<()> {
+        // Pull requests are issues as far as their conversation goes.
+        let path = format!(
+            "repos/{}/issues/{}/comments",
+            repo_path(&item.repo)?,
+            item.number
+        );
+        self.api
+            .send_json(Method::POST, &path, Op::Write, &json!({ "body": body }))
             .await?;
         Ok(())
     }

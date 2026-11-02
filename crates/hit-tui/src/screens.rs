@@ -18,7 +18,7 @@ pub use issues::IssuesTab;
 pub use pulls::{PullsTab, pr_icon, pr_status_spans};
 pub use repos::ReposTab;
 
-use crate::{Action, Ctx, DataEvent, Event, keymap::Command};
+use crate::{Action, Ctx, DataEvent, Event, action::Target, keymap::Command};
 
 /// What Action Required says about each item, for the repository views: the
 /// forge's searches know things an item's own fields do not (mentions, team
@@ -135,6 +135,12 @@ pub trait Tab {
 
     fn is_animating(&self) -> bool {
         false
+    }
+
+    /// What the action menu would act on.
+    fn action_target(&self, ctx: &Ctx) -> Option<Target> {
+        let _ = ctx;
+        None
     }
 
     /// The tab became visible (for entrance animations).

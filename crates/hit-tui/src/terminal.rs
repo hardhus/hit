@@ -75,6 +75,13 @@ impl Drop for TerminalGuard {
     }
 }
 
+/// Takes the screen back after another program had it.
+pub(crate) fn resume(term: &mut Term) -> io::Result<()> {
+    enable_raw_mode()?;
+    execute!(stdout(), EnterAlternateScreen, EnableBracketedPaste, Hide)?;
+    term.clear()
+}
+
 /// Puts the terminal back into its normal state. Every step is attempted even
 /// if an earlier one fails; the first error is returned.
 pub fn restore_terminal() -> io::Result<()> {
