@@ -8,7 +8,7 @@ mod paths;
 pub use edit::{ConfigEdit, SettingValue, apply_edits};
 pub use load::{ConfigError, ConfigWarning, Loaded, Source, default_toml, init, load};
 pub use model::{
-    AuthConfig, CacheConfig, Config, FocusConfig, GeneralConfig, HostConfig, InboxConfig,
-    LogConfig, LogLevel, MarkRead, RefreshConfig, SortOrder, ThemeName, UiConfig,
+    AuthConfig, CacheConfig, ComposeMode, Config, FocusConfig, GeneralConfig, HostConfig,
+    InboxConfig, LogConfig, LogLevel, MarkRead, RefreshConfig, SortOrder, ThemeName, UiConfig,
 };
 pub use paths::{APP_NAME, Paths, PathsError};

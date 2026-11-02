@@ -15,7 +15,7 @@ pub mod query;
 
 pub use error::{AccessHint, ForgeError, Result};
 pub use forge::{
-    Focus, Forge, Health, Issues, Notifications, PullRequests, RateLimit, Repositories,
+    Focus, Forge, Health, Issues, ItemActions, Notifications, PullRequests, RateLimit, Repositories,
 };
 pub use forges::Forges;
 pub use id::{AccountId, ForgeKind, Host, ItemKind, ItemRef, ParseRepoRefError, RepoRef};

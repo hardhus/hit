@@ -596,10 +596,24 @@ async fn check(response: Response) -> Result<Response, ForgeError> {
         .await
         .ok()
         .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok())
-        .and_then(|json| json.get("message")?.as_str().map(str::to_owned))
+        .and_then(|json| error_message(&json))
         .map(|m| m.chars().take(MAX_MESSAGE).collect::<String>())
         .unwrap_or_else(|| status.to_string());
     Err(map_error(status, &headers, message))
+}
+
+/// GitHub's reason: `message`, and for 422s the more useful first detail.
+fn error_message(json: &serde_json::Value) -> Option<String> {
+    let message = json.get("message")?.as_str()?;
+    let detail = json
+        .get("errors")
+        .and_then(|errors| errors.get(0))
+        .and_then(|first| first.get("message").or(Some(first)))
+        .and_then(serde_json::Value::as_str);
+    Some(match detail {
+        Some(detail) => format!("{message}: {detail}"),
+        None => message.to_owned(),
+    })
 }
 
 fn map_error(status: StatusCode, headers: &HeaderMap, message: String) -> ForgeError {
@@ -644,6 +658,9 @@ fn map_error(status: StatusCode, headers: &HeaderMap, message: String) -> ForgeE
             ForgeError::Forbidden { message, hint }
         }
         StatusCode::NOT_FOUND => ForgeError::NotFound,
+        StatusCode::METHOD_NOT_ALLOWED
+        | StatusCode::CONFLICT
+        | StatusCode::UNPROCESSABLE_ENTITY => ForgeError::Rejected(message),
         StatusCode::BAD_GATEWAY | StatusCode::SERVICE_UNAVAILABLE | StatusCode::GATEWAY_TIMEOUT => {
             ForgeError::Unavailable(status.to_string())
         }

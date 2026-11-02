@@ -173,11 +173,26 @@ pub struct GeneralConfig {
     /// Inside a git repository, open on that repository instead of the
     /// overview of everything.
     pub repo_context: bool,
+    /// Where comments are written.
+    pub compose: ComposeMode,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ComposeMode {
+    /// A box inside hit, with `ctrl+e` to move to the editor.
+    #[default]
+    Box,
+    /// Straight to `$VISUAL` or `$EDITOR`.
+    Editor,
 }
 
 impl Default for GeneralConfig {
     fn default() -> Self {
-        Self { repo_context: true }
+        Self {
+            repo_context: true,
+            compose: ComposeMode::default(),
+        }
     }
 }
 

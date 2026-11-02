@@ -21,7 +21,7 @@ use tokio::task::JoinHandle;
 use super::{JumpTarget, Tab, TabArea};
 use crate::{
     Action, Ctx, DataEvent, Event,
-    action::{Detail, Toast},
+    action::{Detail, Target, Toast},
     anim::{Moment, Tween},
     browser,
     keymap::{Command, typed_char},
@@ -933,6 +933,14 @@ impl Tab for FocusTab {
             .values()
             .any(|d| d.refreshing || (d.focus.is_none() && d.error.is_none()));
         entering || gliding || spinning
+    }
+
+    fn action_target(&self, ctx: &Ctx) -> Option<Target> {
+        let (account, item) = self.selected_item(ctx)?;
+        Some(Target {
+            account,
+            item: item.subject.reference().clone(),
+        })
     }
 
     fn shown(&mut self) {

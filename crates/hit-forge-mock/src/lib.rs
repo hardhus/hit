@@ -17,13 +17,13 @@ use std::{
 
 use async_trait::async_trait;
 use hit_core::{
-    AccountId, Focus, Forge, ForgeError, ForgeKind, Host, Issues, ItemRef, Notifications,
-    PullRequests, RepoRef, Repositories, Result,
+    AccountId, Focus, Forge, ForgeError, ForgeKind, Host, Issues, ItemActions, ItemKind, ItemRef,
+    Notifications, PullRequests, RepoRef, Repositories, Result, Timestamp,
     diff::Diff,
     focus::{self, FocusItem, FocusSubject},
     model::{
-        Issue, IssueDetail, IssueState, Notification, NotificationId, PrState, PullRequest,
-        PullRequestDetail, Repo,
+        Comment, Issue, IssueDetail, IssueState, Notification, NotificationId, PrState,
+        PullRequest, PullRequestDetail, Repo, User,
     },
     query::{
         Cursor, IssueQuery, NotificationQuery, Page, PageRequest, PrQuery, Scope, Sort, StateFilter,
@@ -159,6 +159,10 @@ impl Forge for MockForge {
         Some(self)
     }
 
+    fn actions(&self) -> Option<&dyn ItemActions> {
+        Some(self)
+    }
+
     /// The demo has nothing secret; a fixed key lets tests exercise the
     /// encrypted cache. (`hit --demo` itself runs without a cache.)
     fn local_key(&self) -> Option<hit_core::Zeroizing<[u8; 32]>> {
@@ -272,6 +276,43 @@ impl Issues for MockForge {
             .find(|d| &d.issue.reference == issue)
             .cloned()
             .ok_or(ForgeError::NotFound)
+    }
+}
+
+#[async_trait]
+impl ItemActions for MockForge {
+    async fn comment(&self, item: &ItemRef, body: &str) -> Result<()> {
+        self.network().await?;
+        let now = Timestamp::now();
+        let comment = Comment {
+            id: format!("local-{}", now.as_millisecond()),
+            author: User::new(self.me()),
+            body: body.to_owned(),
+            created_at: now,
+            updated_at: now,
+        };
+        let mut data = self.data();
+        match item.kind {
+            ItemKind::PullRequest => {
+                let detail = data
+                    .pulls
+                    .iter_mut()
+                    .find(|d| &d.pr.reference == item)
+                    .ok_or(ForgeError::NotFound)?;
+                detail.comments.push(comment);
+                detail.pr.comments += 1;
+            }
+            ItemKind::Issue => {
+                let detail = data
+                    .issues
+                    .iter_mut()
+                    .find(|d| &d.issue.reference == item)
+                    .ok_or(ForgeError::NotFound)?;
+                detail.comments.push(comment);
+                detail.issue.comments += 1;
+            }
+        }
+        Ok(())
     }
 }
 

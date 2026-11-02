@@ -70,6 +70,12 @@ pub trait Forge: Send + Sync {
         None
     }
 
+    /// Changing things on the forge. Read-only accounts refuse these before
+    /// anything is sent.
+    fn actions(&self) -> Option<&dyn ItemActions> {
+        None
+    }
+
     fn health(&self) -> Health {
         Health::default()
     }
@@ -88,6 +94,12 @@ pub trait Forge: Send + Sync {
     fn local_key(&self) -> Option<Zeroizing<[u8; 32]>> {
         None
     }
+}
+
+#[async_trait]
+pub trait ItemActions: Send + Sync {
+    /// Adds a comment to a pull request or an issue.
+    async fn comment(&self, item: &ItemRef, body: &str) -> Result<()>;
 }
 
 #[async_trait]

@@ -2,8 +2,8 @@
 //! is opened to change how hit behaves day to day, not to read a manual.
 
 use hit_config::{
-    CacheConfig, Config, FocusConfig, LogConfig, LogLevel, MarkRead, RefreshConfig, SettingValue,
-    SortOrder, UiConfig,
+    CacheConfig, ComposeMode, Config, FocusConfig, LogConfig, LogLevel, MarkRead, RefreshConfig,
+    SettingValue, SortOrder, UiConfig,
 };
 
 /// When a change takes effect.
@@ -232,6 +232,29 @@ pub static SETTINGS: &[Setting] = &[
         help: "Inside a git repository, hit opens on it. `.` shows everything.",
         applies: Applies::NextStart,
         kind: toggle!(general.repo_context),
+        confirm: None,
+    },
+    Setting {
+        group: "Writing",
+        section: "general",
+        key: "compose",
+        label: "Write comments in",
+        help: "box: inside hit, ctrl+e moves to your editor. editor: straight to $VISUAL or $EDITOR.",
+        applies: Applies::Now,
+        kind: Kind::Choice {
+            options: &["box", "editor"],
+            get: |c| match c.general.compose {
+                ComposeMode::Box => "box",
+                ComposeMode::Editor => "editor",
+            },
+            set: |c, v| {
+                c.general.compose = if v == "editor" {
+                    ComposeMode::Editor
+                } else {
+                    ComposeMode::Box
+                };
+            },
+        },
         confirm: None,
     },
     Setting {

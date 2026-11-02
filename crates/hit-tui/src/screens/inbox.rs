@@ -24,7 +24,7 @@ use tokio::task::JoinHandle;
 use super::{Tab, TabArea, focus::spinner};
 use crate::{
     Action, Ctx, DataEvent, Event, Theme,
-    action::{Detail, Toast},
+    action::{Detail, Target, Toast},
     anim::{Moment, Tween},
     browser,
     keymap::{Command, typed_char},
@@ -913,6 +913,14 @@ impl Tab for InboxTab {
             .values()
             .any(|d| d.refreshing || (d.items.is_none() && d.error.is_none()));
         entering || gliding || popping || spinning
+    }
+
+    fn action_target(&self, ctx: &Ctx) -> Option<Target> {
+        let (account, n) = self.selected(ctx)?;
+        Some(Target {
+            account,
+            item: n.subject.item?,
+        })
     }
 
     fn shown(&mut self) {

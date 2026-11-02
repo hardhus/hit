@@ -19,7 +19,7 @@ use tokio::task::JoinHandle;
 
 use crate::{
     Action, Ctx, DataEvent, Event, View,
-    action::Toast,
+    action::{Target, Toast},
     anim::{Moment, Tween},
     browser,
     highlight::HighlightedDiff,
@@ -695,6 +695,7 @@ impl PullView {
             }
             Pane::Checks => items.push((&[Command::Down, Command::Up], "select")),
         }
+        items.insert(0, (&[Command::Actions], "actions"));
         items.push((&[Command::Browser], "browser"));
         items.push((&[Command::Refresh], "refresh"));
         items.push((&[Command::Back], "back"));
@@ -819,6 +820,12 @@ impl View for PullView {
         match ctx.keymap.lookup(key, &[Scope::List, Scope::Global])? {
             Command::Back => return Some(Action::Back),
             Command::Quit => return Some(Action::Quit),
+            Command::Actions => {
+                return Some(Action::OpenActions(Target {
+                    account: self.account.clone(),
+                    item: self.item.clone(),
+                }));
+            }
             Command::Tab1 => self.switch(0, ctx),
             Command::Tab2 => self.switch(1, ctx),
             Command::Tab3 => self.switch(2, ctx),
@@ -876,8 +883,13 @@ impl View for PullView {
         Some(Action::Redraw)
     }
 
-    fn update(&mut self, action: &Action, _ctx: &Ctx) -> Option<Action> {
+    fn update(&mut self, action: &Action, ctx: &Ctx) -> Option<Action> {
         match action {
+            Action::Data(DataEvent::ActionDone {
+                target,
+                result: Ok(()),
+                ..
+            }) if target.item == self.item => self.mount(ctx),
             Action::Data(DataEvent::PullDetail { item, result }) if *item == self.item => {
                 match result {
                     Ok(loaded) => {

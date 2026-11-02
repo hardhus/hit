@@ -1,3 +1,5 @@
+mod actions;
+mod compose;
 mod detail;
 mod issue;
 mod login;
@@ -6,6 +8,8 @@ mod settings;
 mod thread;
 mod welcome;
 
+pub use actions::ActionMenu;
+pub use compose::ComposeView;
 pub use detail::DetailView;
 pub use issue::IssueView;
 pub use login::LoginView;

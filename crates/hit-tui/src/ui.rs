@@ -2,6 +2,7 @@
 //! it is on: callers pass data, theme and timing in.
 
 pub mod chips;
+pub mod editor;
 pub mod hints;
 pub mod list;
 pub mod picker;

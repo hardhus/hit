@@ -1,8 +1,8 @@
-use std::{path::PathBuf, sync::Arc, time::Instant};
+use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Instant};
 
 use hit_cache::Cache;
 use hit_config::{Config, InboxConfig, RefreshConfig, SortOrder};
-use hit_core::{AccountId, Forge, Forges, RepoRef, auth::LoginFlow, query::Scope};
+use hit_core::{AccountId, Forge, Forges, ItemRef, RepoRef, auth::LoginFlow, query::Scope};
 use ratatui::{Frame, layout::Rect, style::Color};
 use tokio::sync::mpsc;
 
@@ -62,6 +62,8 @@ pub struct Ctx {
     /// this way.
     pub started_config: Config,
     pub config_file: Option<PathBuf>,
+    /// Comments started and not sent, for the rest of this run.
+    pub drafts: HashMap<ItemRef, String>,
     /// Only this account is shown; `None` shows all (audit D-039). Future
     /// profiles will set this instead of views knowing about accounts.
     pub account_filter: Option<AccountId>,
@@ -93,6 +95,7 @@ impl Ctx {
             config: config.clone(),
             started_config: config.clone(),
             config_file: services.config_file,
+            drafts: HashMap::new(),
             account_filter: None,
             scope,
             home_repo: services.repo,
@@ -215,6 +218,16 @@ pub trait View {
     }
 
     fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx);
+
+    /// Drawn on top of the view below it instead of replacing it.
+    fn is_overlay(&self) -> bool {
+        false
+    }
+
+    /// Draws toasts itself; for any other view on top the app does.
+    fn shows_toasts(&self) -> bool {
+        false
+    }
 
     /// While any view animates, the app redraws at the configured frame cap.
     fn is_animating(&self) -> bool {

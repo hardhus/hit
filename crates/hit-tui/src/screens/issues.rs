@@ -27,7 +27,7 @@ use tokio::task::JoinHandle;
 use super::{FocusAsks, JumpTarget, Tab, TabArea, focus::spinner, issue_fields};
 use crate::{
     Action, Ctx, DataEvent, Event,
-    action::{Detail, Toast},
+    action::{Detail, Target, Toast},
     anim::{Moment, Tween},
     browser,
     keymap::{Command, typed_char},
@@ -1009,6 +1009,14 @@ impl Tab for IssuesTab {
             .values()
             .any(|d| d.items.is_none() && d.error.is_none());
         entering || gliding || popping || loading
+    }
+
+    fn action_target(&self, ctx: &Ctx) -> Option<Target> {
+        let (account, issue) = self.selected_issue(ctx)?;
+        Some(Target {
+            account,
+            item: issue.reference,
+        })
     }
 
     fn shown(&mut self) {

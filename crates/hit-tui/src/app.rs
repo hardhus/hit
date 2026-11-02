@@ -6,13 +6,17 @@ use ratatui::{Frame, widgets::Block};
 use tokio::{sync::mpsc, time::MissedTickBehavior};
 
 use crate::{
-    Action, Ctx, Event, Services, TuiError, View,
+    Action, Ctx, DataEvent, Event, Services, TuiError, View,
     action::{Detail, Toast},
     event::EventSource,
+    external_editor,
     keymap::Keymap,
     shell::Shell,
     terminal::{self, Term, TerminalGuard},
-    views::{DetailView, IssueView, LoginView, PullView, SettingsView, Welcome},
+    ui::toast::Toasts,
+    views::{
+        ActionMenu, ComposeView, DetailView, IssueView, LoginView, PullView, SettingsView, Welcome,
+    },
 };
 
 /// Runs the TUI until the user quits or a shutdown signal arrives.
@@ -43,6 +47,10 @@ pub struct App {
     frame_interval: Duration,
     dirty: bool,
     quit: bool,
+    /// For views that have no toasts of their own (the shell does).
+    toasts: Toasts,
+    /// Text waiting for the user's editor, between the action and the loop.
+    editing: Option<String>,
 }
 
 impl App {
@@ -55,6 +63,8 @@ impl App {
             frame_interval: frame_interval(config),
             dirty: true,
             quit: false,
+            toasts: Toasts::default(),
+            editing: None,
         }
     }
 
@@ -86,6 +96,9 @@ impl App {
         tokio::pin!(shutdown);
 
         while !self.quit {
+            if let Some(text) = self.editing.take() {
+                self.run_editor(term, input, text).await?;
+            }
             if frames.period() != self.frame_interval {
                 frames = tokio::time::interval(self.frame_interval);
                 frames.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -115,12 +128,45 @@ impl App {
         Ok(())
     }
 
+    /// Gives the terminal to the user's editor and takes it back. Background
+    /// tasks keep going; what they send waits in the channel.
+    async fn run_editor(
+        &mut self,
+        term: &mut Term,
+        input: &mut EventSource,
+        text: String,
+    ) -> Result<(), TuiError> {
+        input.pause().await;
+        terminal::restore_terminal().map_err(TuiError::Restore)?;
+        let result = tokio::task::spawn_blocking(move || external_editor::edit(&text))
+            .await
+            .unwrap_or_else(|e| Err(format!("the editor stopped unexpectedly: {e}")));
+        terminal::resume(term).map_err(TuiError::Setup)?;
+        input.resume();
+        self.on_action(Action::EditorDone(result));
+        self.dirty = true;
+        Ok(())
+    }
+
     fn draw(&mut self, term: &mut Term) -> Result<(), TuiError> {
-        let Self { views, ctx, .. } = self;
-        terminal::draw_guarded(|| term.draw(|frame| render(frame, views, ctx)))
-            .ok_or(TuiError::Panicked)?
-            .map(|_| ())
-            .map_err(TuiError::Draw)
+        let Self {
+            views, ctx, toasts, ..
+        } = self;
+        toasts.prune();
+        terminal::draw_guarded(|| {
+            term.draw(|frame| {
+                render(frame, views, ctx);
+                // Under a view without toasts, the shell's cannot be seen.
+                if !views.last().is_some_and(|view| view.shows_toasts()) {
+                    let area = frame.area();
+                    toasts.render(frame, area, &ctx.theme);
+                }
+                crate::ui::scrub(frame.buffer_mut());
+            })
+        })
+        .ok_or(TuiError::Panicked)?
+        .map(|_| ())
+        .map_err(TuiError::Draw)
     }
 
     fn on_event(&mut self, event: &Event) {
@@ -168,6 +214,40 @@ impl App {
                 }
             }
             Action::Redraw => {}
+            Action::OpenActions(ref target) => {
+                self.push(Box::new(ActionMenu::new(target.clone())));
+                return;
+            }
+            Action::Compose(ref target) => {
+                // In place of the menu that offered it.
+                self.views.pop();
+                let draft = self
+                    .ctx
+                    .drafts
+                    .get(&target.item)
+                    .cloned()
+                    .unwrap_or_default();
+                self.push(Box::new(ComposeView::new(target.clone(), &draft)));
+                return;
+            }
+            Action::CloseCompose {
+                ref target,
+                ref draft,
+            } => {
+                if draft.trim().is_empty() {
+                    self.ctx.drafts.remove(&target.item);
+                } else {
+                    self.ctx.drafts.insert(target.item.clone(), draft.clone());
+                    self.toasts.push(Toast::info("draft kept for this item"));
+                }
+                self.views.pop();
+                self.dirty = true;
+                return;
+            }
+            Action::EditInEditor(ref text) => {
+                self.editing = Some(text.clone());
+                return;
+            }
             Action::OpenSettings => {
                 self.push(Box::new(SettingsView::new()));
                 return;
@@ -184,6 +264,19 @@ impl App {
             // Background results and toasts concern every view, not just
             // the one on top (e.g. the shell under a detail view).
             Action::Data(_) | Action::Toast(_) => {
+                if let Action::Toast(toast) = &action {
+                    self.toasts.push(toast.clone());
+                }
+                if let Action::Data(DataEvent::ActionDone {
+                    what,
+                    result: Ok(()),
+                    target,
+                }) = &action
+                {
+                    self.ctx.drafts.remove(&target.item);
+                    self.toasts
+                        .push(Toast::success(format!("{what} on {}", target.item)));
+                }
                 let mut follow_ups = Vec::new();
                 for view in &mut self.views {
                     follow_ups.extend(view.update(&action, &self.ctx));
@@ -242,7 +335,7 @@ impl App {
                 self.push(view);
                 return;
             }
-            Action::Run(_) => {}
+            Action::Run(_) | Action::EditorDone(_) => {}
             Action::OpenLogin => {
                 if let Some(flow) = self.ctx.login.clone() {
                     self.push(Box::new(LoginView::new(flow)));
@@ -286,10 +379,14 @@ fn frame_interval(config: &Config) -> Duration {
 fn render(frame: &mut Frame, views: &mut [Box<dyn View>], ctx: &Ctx) {
     let area = frame.area();
     frame.render_widget(Block::new().style(ctx.theme.base()), area);
-    if let Some(view) = views.last_mut() {
+    // From the last full screen up, so an overlay has something under it.
+    let from = views
+        .iter()
+        .rposition(|view| !view.is_overlay())
+        .unwrap_or(0);
+    for view in views.iter_mut().skip(from) {
         view.render(frame, area, ctx);
     }
-    crate::ui::scrub(frame.buffer_mut());
 }
 
 /// Ctrl+C always quits, even if a view (e.g. a text input) would take the key.
