@@ -27,8 +27,9 @@ pub struct TabBar<'a> {
     pub logo: bool,
     /// Phase for the logo and underline gradients.
     pub phase: f32,
-    /// Shown at the right end (accounts, mode badges).
-    pub right: Line<'static>,
+    /// Shown at the right end (accounts, mode badges): the first one that
+    /// fits next to the tabs.
+    pub right: Vec<Line<'static>>,
 }
 
 impl TabBar<'_> {
@@ -82,10 +83,13 @@ impl TabBar<'_> {
             },
         ];
         frame.render_widget(Paragraph::new(Line::from(spans)), top);
-        frame.render_widget(
-            Paragraph::new(self.right.clone()).alignment(ratatui::layout::Alignment::Right),
-            top,
-        );
+        let room = usize::from(area.width.saturating_sub(column));
+        if let Some(right) = self.right.iter().find(|line| line.width() < room) {
+            frame.render_widget(
+                Paragraph::new(right.clone()).alignment(ratatui::layout::Alignment::Right),
+                top,
+            );
+        }
 
         // Baseline with the gliding underline on top.
         let buf = frame.buffer_mut();

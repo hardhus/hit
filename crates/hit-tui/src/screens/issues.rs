@@ -217,7 +217,7 @@ pub fn issue_status_spans(issue: &Issue, ctx: &Ctx) -> Vec<Span<'static>> {
     }
     if issue.comments > 0 {
         spans.push(sep());
-        spans.push(Span::styled(format!("{} comments", issue.comments), muted));
+        spans.push(Span::styled(chips::comments(issue.comments), muted));
     }
     spans.push(sep());
     spans.push(Span::styled(sync::ago(issue.updated_at), muted));

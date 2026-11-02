@@ -3,7 +3,7 @@
 
 use hit_config::{
     CacheConfig, Config, FocusConfig, LogConfig, LogLevel, MarkRead, RefreshConfig, SettingValue,
-    SortOrder, ThemeName, UiConfig,
+    SortOrder, UiConfig,
 };
 
 /// When a change takes effect.
@@ -95,12 +95,6 @@ fn mark_read_name(mark_read: MarkRead) -> &'static str {
         MarkRead::Manual => "manual",
         MarkRead::Open => "open",
         MarkRead::Leave => "leave",
-    }
-}
-
-fn theme_name(theme: ThemeName) -> &'static str {
-    match theme {
-        ThemeName::Jinx => "jinx",
     }
 }
 
@@ -284,20 +278,6 @@ pub static SETTINGS: &[Setting] = &[
         help: "Keep the terminal's own background visible behind hit.",
         applies: Applies::Now,
         kind: toggle!(ui.transparent),
-        confirm: None,
-    },
-    Setting {
-        group: "Appearance",
-        section: "ui",
-        key: "theme",
-        label: "Theme",
-        help: "Jinx is the only theme for now.",
-        applies: Applies::Now,
-        kind: Kind::Choice {
-            options: &["jinx"],
-            get: |c| theme_name(c.ui.theme),
-            set: |c, _| c.ui.theme = ThemeName::Jinx,
-        },
         confirm: None,
     },
     Setting {
