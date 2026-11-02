@@ -13,6 +13,28 @@ use hit_config::Paths;
 
 use crate::cli::{Cli, Command};
 
+/// `hit ... | head` closes the pipe while hit is still printing, and `println!`
+/// panics about it. Nothing is wrong: the reader has what it wanted.
+fn quiet_when_nobody_reads() {
+    let report = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let payload = info.payload();
+        let message = payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .unwrap_or_default();
+        // The text after the code is in the system's language.
+        let closed = ["os error 32)", "os error 109)", "os error 232)"]
+            .iter()
+            .any(|code| message.contains(code));
+        if message.starts_with("failed printing to stdout") && closed {
+            std::process::exit(0);
+        }
+        report(info);
+    }));
+}
+
 fn main() -> Result<ExitCode> {
     color_eyre::config::HookBuilder::default()
         .panic_section(format!(
@@ -22,6 +44,8 @@ fn main() -> Result<ExitCode> {
         .display_env_section(false)
         .display_location_section(cfg!(debug_assertions))
         .install()?;
+
+    quiet_when_nobody_reads();
 
     let cli = Cli::parse();
 
